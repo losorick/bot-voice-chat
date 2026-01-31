@@ -318,7 +318,7 @@ except ImportError:
     print("⚠️ Flask 未安装，运行测试需要安装: pip install flask")
 
 if FLASK_AVAILABLE:
-    from flask import Flask, request, jsonify, g, Blueprint
+    from flask import Flask, request, jsonify, g, Blueprint, redirect
     
     # 导入历史管理器
     from history_manager import get_history_manager
@@ -707,6 +707,34 @@ if FLASK_AVAILABLE:
     # 注册蓝图到 Flask 应用
     app = Flask(__name__)
     app.register_blueprint(v1_bp)
+    
+    # HTTPS 强制跳转中间件
+    @app.before_request
+    def force_https():
+        """
+        检测 HTTP 请求并重定向到 HTTPS
+        
+        生产环境默认启用，可通过环境变量 FORCE_HTTPS 控制:
+        - FORCE_HTTPS=true  (默认) - 强制 HTTPS
+        - FORCE_HTTPS=false - 允许 HTTP
+        """
+        force_https_env = os.environ.get('FORCE_HTTPS', 'true').lower() == 'true'
+        
+        if not force_https_env:
+            return None
+        
+        # 检查是否是 HTTPS 请求（直接检查或通过代理头）
+        if request.is_secure:
+            return None
+        
+        # 检查 X-Forwarded-Proto 头（反向代理场景）
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'http')
+        if forwarded_proto == 'https':
+            return None
+        
+        # 构建 HTTPS URL 并重定向（301 永久重定向）
+        url = request.url.replace('http://', 'https://', 1)
+        return redirect(url, code=301)
 
 
 # ============================================================================
