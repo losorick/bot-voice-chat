@@ -16,12 +16,13 @@ Bot 语音沟通 - 阿里云百炼大模型测试后端
 import os
 import sys
 import json
-import time
+import re
 import uuid
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from functools import wraps
+from html import escape as html_escape
 
 # ============================================================================
 # 结构化日志配置
@@ -91,6 +92,269 @@ try:
 except ImportError:
     print("❌ 缺少依赖库，请运行: pip install requests")
     sys.exit(1)
+
+
+# ============================================================================
+# 安全防护模块
+# ============================================================================
+
+# SQL 注入检测正则（常见攻击模式）
+SQL_INJECTION_PATTERNS = [
+    r"(\b(SELECT|INSERT|UPDATE|DELETE|DROP|UNION|ALTER|CREATE|TRUNCATE)\b)",
+    r"(--|;|/\*|\*/|@@|@)",
+    r"(\bOR\b.*=.*\bOR\b)",
+    r"(\bAND\b.*=.*\bAND\b)",
+    r"['\"]",
+    r"(EXEC(\s|\+)+(S|X)P\w+)",
+    r"(0x[0-9a-fA-F]+)",
+]
+
+# XSS 攻击检测正则
+XSS_PATTERNS = [
+    r"<script.*?>.*?</script>",
+    r"javascript:",
+    r"on\w+\s*=",
+    r"<iframe.*?>.*?</iframe>",
+    r"<object.*?>.*?</object>",
+    r"<embed.*?>",
+    r"expression\s*\(",
+    r"data:text/html",
+    r"<svg.*?>.*?</svg>",
+    r"onload|onerror|onmouseover",
+]
+
+# 危险字符黑名单（用于文件名、ID 等）
+DANGEROUS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+
+
+class InputValidator:
+    """输入验证器"""
+    
+    def __init__(self):
+        self.sql_pattern = re.compile('|'.join(SQL_INJECTION_PATTERNS), re.IGNORECASE)
+        self.xss_pattern = re.compile('|'.join(XSS_PATTERNS), re.IGNORECASE | re.DOTALL)
+    
+    def validate_string(self, value: Any, field_name: str = "field", 
+                       max_length: int = 10000, allow_html: bool = False) -> str:
+        """
+        验证字符串输入
+        
+        Args:
+            value: 输入值
+            field_name: 字段名称（用于错误信息）
+            max_length: 最大长度
+            allow_html: 是否允许 HTML
+            
+        Returns:
+            清理后的字符串
+            
+        Raises:
+            ValueError: 验证失败
+        """
+        if value is None:
+            raise ValueError(f"{field_name} 不能为空")
+        
+        if not isinstance(value, str):
+            raise ValueError(f"{field_name} 必须是字符串类型")
+        
+        # 检查长度
+        if len(value) > max_length:
+            raise ValueError(f"{field_name} 长度不能超过 {max_length} 字符")
+        
+        if not value.strip():
+            raise ValueError(f"{field_name} 不能为空或仅包含空白字符")
+        
+        # 检测 SQL 注入
+        if self.sql_pattern.search(value):
+            raise ValueError(f"{field_name} 包含非法字符或SQL注入特征")
+        
+        # 检测 XSS 攻击（除非允许 HTML）
+        if not allow_html and self.xss_pattern.search(value):
+            raise ValueError(f"{field_name} 包含潜在的XSS攻击特征")
+        
+        return value.strip()
+    
+    def sanitize_string(self, value: str, allow_html: bool = False) -> str:
+        """
+        清理字符串输入
+        
+        Args:
+            value: 原始字符串
+            allow_html: 是否允许 HTML
+            
+        Returns:
+            清理后的字符串
+        """
+        if not isinstance(value, str):
+            return str(value)
+        
+        # HTML 转义（除非允许 HTML）
+        if not allow_html:
+            value = html_escape(value)
+        
+        # 移除危险字符
+        value = DANGEROUS_CHARS.sub('', value)
+        
+        # 规范化空白字符
+        value = re.sub(r'\s+', ' ', value)
+        
+        return value.strip()
+    
+    def validate_conversation_id(self, conversation_id: str) -> str:
+        """验证对话 ID 格式"""
+        if not conversation_id:
+            raise ValueError("conversation_id 不能为空")
+        
+        # 验证格式：只允许字母、数字、下划线、中划线
+        if not re.match(r'^[a-zA-Z0-9_-]+$', conversation_id):
+            raise ValueError("conversation_id 格式无效，只允许字母、数字、下划线和中划线")
+        
+        # 检测 SQL 注入
+        if self.sql_pattern.search(conversation_id):
+            raise ValueError("conversation_id 包含非法字符")
+        
+        return conversation_id
+    
+    def validate_role(self, role: str) -> str:
+        """验证消息角色"""
+        valid_roles = {'user', 'assistant', 'system'}
+        role = role.lower().strip()
+        
+        if role not in valid_roles:
+            raise ValueError(f"无效的角色: {role}，必须是: {', '.join(valid_roles)}")
+        
+        return role
+    
+    def validate_model(self, model: str) -> str:
+        """验证模型名称"""
+        if model not in Config.SUPPORTED_MODELS:
+            raise ValueError(f"不支持的模型: {model}，支持的模型: {', '.join(Config.SUPPORTED_MODELS)}")
+        return model
+    
+    def validate_temperature(self, temperature: Any) -> float:
+        """验证温度参数"""
+        try:
+            temp = float(temperature)
+        except (TypeError, ValueError):
+            raise ValueError("temperature 必须是数字")
+        
+        if temp < 0 or temp > 2:
+            raise ValueError("temperature 必须在 0-2 之间")
+        
+        return temp
+    
+    def validate_max_tokens(self, max_tokens: Any) -> int:
+        """验证最大 token 数"""
+        try:
+            tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            raise ValueError("max_tokens 必须是整数")
+        
+        if tokens < 1 or tokens > 128000:
+            raise ValueError("max_tokens 必须在 1-128000 之间")
+        
+        return tokens
+    
+    def validate_message(self, message: Dict[str, Any]) -> Dict[str, str]:
+        """
+        验证消息格式
+        
+        Args:
+            message: 消息字典
+            
+        Returns:
+            验证后的消息字典
+            
+        Raises:
+            ValueError: 验证失败
+        """
+        if not isinstance(message, dict):
+            raise ValueError("消息必须是字典格式")
+        
+        if 'role' not in message:
+            raise ValueError("消息必须包含 role 字段")
+        
+        if 'content' not in message:
+            raise ValueError("消息必须包含 content 字段")
+        
+        role = self.validate_role(message['role'])
+        content = self.validate_string(
+            message['content'], 
+            field_name="content", 
+            max_length=50000
+        )
+        
+        return {
+            'role': role,
+            'content': self.sanitize_string(content)
+        }
+    
+    def validate_messages(self, messages: Any) -> List[Dict[str, str]]:
+        """
+        验证消息列表
+        
+        Args:
+            messages: 消息列表
+            
+        Returns:
+            验证后的消息列表
+            
+        Raises:
+            ValueError: 验证失败
+        """
+        if not isinstance(messages, list):
+            raise ValueError("messages 必须是列表格式")
+        
+        if len(messages) == 0:
+            raise ValueError("messages 列表不能为空")
+        
+        if len(messages) > 100:
+            raise ValueError("messages 列表不能超过 100 条")
+        
+        validated = []
+        for i, msg in enumerate(messages):
+            try:
+                validated_msg = self.validate_message(msg)
+                validated.append(validated_msg)
+            except ValueError as e:
+                raise ValueError(f"消息[{i}]验证失败: {e}")
+        
+        return validated
+
+
+# 全局验证器实例
+validator = InputValidator()
+
+
+def validate_json_content_type(func):
+    """验证 JSON 内容类型装饰器"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if request.method in ['POST', 'PUT', 'PATCH']:
+            content_type = request.content_type or ''
+            if 'application/json' not in content_type:
+                return jsonify({
+                    'success': False,
+                    'error': 'Content-Type 必须为 application/json',
+                    'request_id': getattr(g, 'request_id', '')
+                }), 400
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def safe_json_response(data: Any) -> Dict[str, Any]:
+    """安全地构建 JSON 响应（自动转义敏感内容）"""
+    def sanitize(obj):
+        if isinstance(obj, str):
+            return html_escape(obj)
+        elif isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [sanitize(item) for item in obj]
+        else:
+            return obj
+    
+    return sanitize(data)
 
 
 # ============================================================================
@@ -366,6 +630,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/chat', methods=['POST'])
+    @validate_json_content_type
     def chat():
         """
         对话接口
@@ -399,10 +664,59 @@ if FLASK_AVAILABLE:
                     'request_id': request_id
                 }), 400
             
-            messages = data['messages']
+            # ========== 输入验证开始 ==========
+            # 验证并清理 messages
+            try:
+                messages = validator.validate_messages(data['messages'])
+            except ValueError as e:
+                log_with_data(f"Messages validation failed: {e}", 
+                             level=logging.WARNING, request_id=request_id)
+                return jsonify({
+                    'error': f'消息验证失败: {e}',
+                    'request_id': request_id
+                }), 400
+            
+            # 验证 model 参数
             model = data.get('model', Config.DEFAULT_MODEL)
+            try:
+                model = validator.validate_model(model)
+            except ValueError as e:
+                return jsonify({
+                    'error': str(e),
+                    'request_id': request_id
+                }), 400
+            
+            # 验证 temperature 参数
             temperature = data.get('temperature', 0.7)
+            try:
+                temperature = validator.validate_temperature(temperature)
+            except ValueError as e:
+                return jsonify({
+                    'error': str(e),
+                    'request_id': request_id
+                }), 400
+            
+            # 验证 max_tokens 参数
             max_tokens = data.get('max_tokens', 2000)
+            try:
+                max_tokens = validator.validate_max_tokens(max_tokens)
+            except ValueError as e:
+                return jsonify({
+                    'error': str(e),
+                    'request_id': request_id
+                }), 400
+            
+            # 验证 conversation_id（如果有）
+            conversation_id = data.get('conversation_id')
+            if conversation_id:
+                try:
+                    conversation_id = validator.validate_conversation_id(conversation_id)
+                except ValueError as e:
+                    return jsonify({
+                        'error': str(e),
+                        'request_id': request_id
+                    }), 400
+            # ========== 输入验证结束 ==========
             
             log_with_data("Calling DashScope API", request_id=request_id,
                          extra_data={'model': model, 'temperature': temperature})
@@ -423,7 +737,6 @@ if FLASK_AVAILABLE:
             output_tokens = usage.get('output_tokens', 0)
             
             # 保存到历史记录（如果有 conversation_id）
-            conversation_id = data.get('conversation_id')
             if conversation_id:
                 history_manager = get_history_manager()
                 # 添加用户消息
@@ -496,11 +809,24 @@ if FLASK_AVAILABLE:
         
         GET /api/v1/conversations
         Query params:
-            limit: 返回数量限制 (默认 20)
+            limit: 返回数量限制 (默认 20, 最大 100)
             offset: 偏移量 (默认 0)
         """
-        limit = request.args.get('limit', 20, type=int)
-        offset = request.args.get('offset', 0, type=int)
+        # 验证 limit 参数
+        try:
+            limit = request.args.get('limit', 20, type=int)
+            if limit < 1 or limit > 100:
+                limit = 20  # 超出范围使用默认值
+        except (TypeError, ValueError):
+            limit = 20
+        
+        # 验证 offset 参数
+        try:
+            offset = request.args.get('offset', 0, type=int)
+            if offset < 0:
+                offset = 0
+        except (TypeError, ValueError):
+            offset = 0
         
         history_manager = get_history_manager()
         result = history_manager.get_conversations(limit=limit, offset=offset)
@@ -512,6 +838,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/conversations', methods=['POST'])
+    @validate_json_content_type
     def create_conversation():
         """
         创建新对话
@@ -523,8 +850,37 @@ if FLASK_AVAILABLE:
         """
         data = request.get_json() or {}
         
+        # 验证并清理 title（如果有）
         title = data.get('title')
+        if title:
+            try:
+                title = validator.validate_string(
+                    title, 
+                    field_name='title', 
+                    max_length=200
+                )
+            except ValueError as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'request_id': g.request_id
+                }), 400
+        
+        # 验证并清理 system_prompt（如果有）
         system_prompt = data.get('system_prompt')
+        if system_prompt:
+            try:
+                system_prompt = validator.validate_string(
+                    system_prompt, 
+                    field_name='system_prompt', 
+                    max_length=10000
+                )
+            except ValueError as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'request_id': g.request_id
+                }), 400
         
         history_manager = get_history_manager()
         conversation = history_manager.create_conversation(
@@ -548,6 +904,16 @@ if FLASK_AVAILABLE:
         
         GET /api/v1/conversations/<conversation_id>
         """
+        # 验证 conversation_id 格式
+        try:
+            conversation_id = validator.validate_conversation_id(conversation_id)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
         history_manager = get_history_manager()
         conversation = history_manager.get_conversation(conversation_id)
         
@@ -571,6 +937,16 @@ if FLASK_AVAILABLE:
         
         DELETE /api/v1/conversations/<conversation_id>
         """
+        # 验证 conversation_id 格式
+        try:
+            conversation_id = validator.validate_conversation_id(conversation_id)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
         history_manager = get_history_manager()
         success = history_manager.delete_conversation(conversation_id)
         
@@ -590,6 +966,7 @@ if FLASK_AVAILABLE:
             }), 404
     
     @v1_bp.route('/api/v1/conversations/<conversation_id>/messages', methods=['POST'])
+    @validate_json_content_type
     def add_message(conversation_id: str):
         """
         添加消息到对话
@@ -600,6 +977,16 @@ if FLASK_AVAILABLE:
             content: 消息内容
             token_count: Token 数量（可选）
         """
+        # 验证 conversation_id 格式
+        try:
+            conversation_id = validator.validate_conversation_id(conversation_id)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
         data = request.get_json()
         
         if not data or 'content' not in data:
@@ -609,15 +996,38 @@ if FLASK_AVAILABLE:
                 'request_id': g.request_id
             }), 400
         
+        # 验证并清理 content
+        try:
+            content = validator.validate_string(
+                data['content'], 
+                field_name='content',
+                max_length=50000
+            )
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
+        # 验证 role
         role = data.get('role', 'user')
-        content = data.get('content')
+        try:
+            role = validator.validate_role(role)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
         token_count = data.get('token_count')
         
         history_manager = get_history_manager()
         message = history_manager.add_message(
             conversation_id=conversation_id,
             role=role,
-            content=content,
+            content=validator.sanitize_string(content),
             token_count=token_count
         )
         
@@ -643,7 +1053,24 @@ if FLASK_AVAILABLE:
         Query params:
             format: 导出格式 (json/text, 默认 json)
         """
+        # 验证 conversation_id 格式
+        try:
+            conversation_id = validator.validate_conversation_id(conversation_id)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
+        # 验证 format 参数
         format_type = request.args.get('format', 'json')
+        if format_type not in ['json', 'text']:
+            return jsonify({
+                'success': False,
+                'error': 'format 参数无效，只支持 json 或 text',
+                'request_id': g.request_id
+            }), 400
         
         history_manager = get_history_manager()
         content = history_manager.export_conversation(
