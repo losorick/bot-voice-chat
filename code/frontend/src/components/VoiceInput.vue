@@ -1,11 +1,16 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useChatStore } from '../stores/chat'
+import { useWaveform } from '../composables/useWaveform'
 import ASRService from '../services/asr'
 
 const chatStore = useChatStore()
 const isSupported = ref(false)
 const buttonText = ref('按住说话')
+
+// 波形可视化
+const waveformCanvas = ref(null)
+const { init: initWaveform, startVisualization, stopVisualization } = useWaveform()
 
 // 检查浏览器是否支持语音识别
 onMounted(() => {
@@ -37,11 +42,24 @@ onUnmounted(() => {
 })
 
 // 鼠标按下开始录音
-function startRecording() {
+async function startRecording() {
   if (!isSupported.value) return
   
   chatStore.setListening(true)
   buttonText.value = '监听中...'
+  
+  // 初始化波形可视化
+  if (waveformCanvas.value) {
+    initWaveform(waveformCanvas.value)
+  }
+  
+  // 获取媒体流并启动可视化
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    startVisualization(stream)
+  } catch (error) {
+    console.warn('Could not access microphone for visualization:', error)
+  }
   
   // 使用阿里云 ASR
   ASRService.start()
@@ -51,6 +69,9 @@ function startRecording() {
 function stopRecording() {
   chatStore.setListening(false)
   buttonText.value = '按住说话'
+  
+  // 停止波形可视化
+  stopVisualization()
   
   ASRService.stop()
 }
@@ -65,6 +86,10 @@ function handleClick() {
 
 <template>
   <div class="voice-input">
+    <div v-if="chatStore.isListening" class="waveform-container">
+      <canvas ref="waveformCanvas" class="waveform-canvas"></canvas>
+    </div>
+    
     <button
       class="voice-button"
       :class="{ listening: chatStore.isListening }"
@@ -90,6 +115,21 @@ function handleClick() {
   flex-direction: column;
   align-items: center;
   gap: 8px;
+}
+
+.waveform-container {
+  width: 100%;
+  max-width: 300px;
+  height: 60px;
+  background: rgba(102, 126, 234, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.waveform-canvas {
+  width: 100%;
+  height: 100%;
 }
 
 .voice-button {
