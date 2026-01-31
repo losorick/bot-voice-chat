@@ -17,3 +17,6 @@ python-dotenv>=1.0.0
 
 # 日志管理 (可选)
 loguru>=0.6.0
+
+# JWT 认证 (可选，用于 JWT Token 认证)
+PyJWT>=2.8.0

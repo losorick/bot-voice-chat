@@ -9,16 +9,157 @@ import os
 import hashlib
 import secrets
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import jwt
+import uuid
 
 # 导入任务管理模块
 from task_manager import TaskManager, register_task_routes, ConversationTask
 
 app = Flask(__name__)
 CORS(app)
+
+# ============================================================================
+# JWT 配置
+# ============================================================================
+
+class JWTConfig:
+    """JWT 配置类"""
+    
+    # 密钥（从环境变量读取或使用默认值）
+    SECRET_KEY = os.environ.get('JWT_SECRET_KEY', secrets.token_urlsafe(32))
+    
+    # Access Token 过期时间（默认 30 分钟，可配置）
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', 30))
+    
+    # Refresh Token 过期时间（默认 7 天，可配置）
+    REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get('JWT_REFRESH_TOKEN_EXPIRE_DAYS', 7))
+    
+    # Token 算法
+    ALGORITHM = 'HS256'
+
+
+def get_token_expire_times():
+    """获取 token 过期时间配置"""
+    return {
+        'access_token_expire_minutes': JWTConfig.ACCESS_TOKEN_EXPIRE_MINUTES,
+        'refresh_token_expire_days': JWTConfig.REFRESH_TOKEN_EXPIRE_DAYS
+    }
+
+
+def generate_tokens(api_key_id, key_name):
+    """生成 access token 和 refresh token"""
+    
+    now = datetime.utcnow()
+    
+    # Access Token payload
+    access_payload = {
+        'sub': api_key_id,
+        'name': key_name,
+        'type': 'access',
+        'jti': str(uuid.uuid4()),
+        'iat': now,
+        'exp': now + timedelta(minutes=JWTConfig.ACCESS_TOKEN_EXPIRE_MINUTES)
+    }
+    
+    # Refresh Token payload
+    refresh_payload = {
+        'sub': api_key_id,
+        'type': 'refresh',
+        'jti': str(uuid.uuid4()),
+        'iat': now,
+        'exp': now + timedelta(days=JWTConfig.REFRESH_TOKEN_EXPIRE_DAYS)
+    }
+    
+    access_token = jwt.encode(
+        access_payload,
+        JWTConfig.SECRET_KEY,
+        algorithm=JWTConfig.ALGORITHM
+    )
+    
+    refresh_token = jwt.encode(
+        refresh_payload,
+        JWTConfig.SECRET_KEY,
+        algorithm=JWTConfig.ALGORITHM
+    )
+    
+    return {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'token_type': 'Bearer',
+        'expires_in': JWTConfig.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        'expires_at': access_payload['exp'].isoformat()
+    }
+
+
+def verify_token(token, token_type='access'):
+    """验证 token 并返回 payload"""
+    try:
+        payload = jwt.decode(
+            token,
+            JWTConfig.SECRET_KEY,
+            algorithms=[JWTConfig.ALGORITHM]
+        )
+        
+        # 验证 token 类型
+        if token_type == 'access' and payload.get('type') != 'access':
+            return {'valid': False, 'error': 'Invalid token type'}
+        elif token_type == 'refresh' and payload.get('type') != 'refresh':
+            return {'valid': False, 'error': 'Invalid token type'}
+        
+        return {
+            'valid': True,
+            'payload': payload,
+            'api_key_id': payload.get('sub'),
+            'key_name': payload.get('name')
+        }
+    
+    except jwt.ExpiredSignatureError:
+        return {'valid': False, 'error': 'Token has expired'}
+    except jwt.InvalidTokenError as e:
+        return {'valid': False, 'error': f'Invalid token: {str(e)}'}
+
+
+def refresh_access_token(refresh_token):
+    """使用 refresh token 获取新的 access token"""
+    result = verify_token(refresh_token, 'refresh')
+    
+    if not result['valid']:
+        return result
+    
+    # 获取 key 名称
+    keys = load_keys()
+    api_key_id = result['api_key_id']
+    key_name = keys.get(api_key_id, {}).get('name', '')
+    
+    # 生成新的 token 对
+    tokens = generate_tokens(api_key_id, key_name)
+    
+    return {
+        'valid': True,
+        **tokens
+    }
+
+
+# ============================================================================
+# Token 存储（简单的内存存储，生产环境建议使用 Redis）
+# ============================================================================
+
+_revoked_tokens = set()
+
+
+def revoke_token(jti):
+    """撤销 token"""
+    _revoked_tokens.add(jti)
+
+
+def is_token_revoked(jti):
+    """检查 token 是否已撤销"""
+    return jti in _revoked_tokens
+
 
 # 注册任务管理路由
 register_task_routes(app)
@@ -136,7 +277,168 @@ def toggle_key(key_id):
     })
 
 # ============================================================================
-# API Key 验证中间件
+# Token 刷新接口
+# ============================================================================
+
+@app.route('/api/auth/token', methods=['POST'])
+def get_token():
+    """获取 Token（使用 API Key 换取 JWT Token）"""
+    data = request.get_json()
+    
+    api_key_value = data.get('api_key')
+    
+    if not api_key_value:
+        return jsonify({
+            'success': False,
+            'error': 'Missing API Key',
+            'message': '请提供 api_key 参数'
+        }), 401
+    
+    # 验证 API Key
+    keys = load_keys()
+    key_id = None
+    key_name = ''
+    
+    for kid, kdata in keys.items():
+        if kdata['key'] == api_key_value:
+            key_id = kid
+            key_name = kdata.get('name', '')
+            break
+    
+    if not key_id:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid API Key',
+            'message': 'API Key 无效'
+        }), 401
+    
+    key_data = keys[key_id]
+    
+    if not key_data.get('is_active', True):
+        return jsonify({
+            'success': False,
+            'error': 'API Key Disabled',
+            'message': 'API Key 已被禁用'
+        }), 403
+    
+    # 生成 JWT Token 对
+    tokens = generate_tokens(key_id, key_name)
+    
+    # 更新最后使用时间
+    key_data['last_used'] = datetime.now().isoformat()
+    save_keys(keys)
+    
+    return jsonify({
+        'success': True,
+        **tokens
+    })
+
+
+@app.route('/api/auth/refresh', methods=['POST'])
+def refresh_token():
+    """刷新 Access Token"""
+    data = request.get_json()
+    refresh_token_value = data.get('refresh_token')
+    
+    if not refresh_token_value:
+        return jsonify({
+            'success': False,
+            'error': 'Missing refresh_token',
+            'message': '请提供 refresh_token 参数'
+        }), 400
+    
+    result = refresh_access_token(refresh_token_value)
+    
+    if not result.get('valid'):
+        return jsonify({
+            'success': False,
+            'error': result.get('error', 'Invalid refresh token')
+        }), 401
+    
+    return jsonify({
+        'success': True,
+        'access_token': result['access_token'],
+        'token_type': 'Bearer',
+        'expires_in': result['expires_in'],
+        'expires_at': result['expires_at']
+    })
+
+
+@app.route('/api/auth/config', methods=['GET'])
+def auth_config():
+    """获取认证配置（公开信息）"""
+    expire_config = get_token_expire_times()
+    
+    return jsonify({
+        'success': True,
+        'config': {
+            'token_type': 'Bearer',
+            **expire_config
+        }
+    })
+
+
+# ============================================================================
+# JWT Token 验证中间件
+# ============================================================================
+
+def require_jwt_token(f):
+    """JWT Token 验证装饰器"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # 1. 尝试从 Header 获取
+        auth_header = request.headers.get('Authorization', '')
+        
+        token = None
+        
+        if auth_header.startswith('Bearer '):
+            token = auth_header[7:]
+        
+        # 2. 如果没有，从查询参数获取
+        if not token:
+            token = request.args.get('token')
+        
+        # 3. 如果没有，从请求体获取
+        if not token:
+            data = request.get_json(silent=True) or {}
+            token = data.get('token')
+        
+        if not token:
+            return jsonify({
+                'success': False,
+                'error': 'Missing token',
+                'message': '请在 Header (Authorization: Bearer <token>) 或请求参数中添加 token'
+            }), 401
+        
+        # 验证 token
+        result = verify_token(token, 'access')
+        
+        if not result['valid']:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Invalid token')
+            }), 401
+        
+        # 检查 token 是否已撤销
+        jti = result['payload'].get('jti')
+        if jti and is_token_revoked(jti):
+            return jsonify({
+                'success': False,
+                'error': 'Token revoked',
+                'message': 'Token 已被撤销，请重新获取'
+            }), 401
+        
+        # 将 token 信息注入请求上下文
+        request.jwt_payload = result['payload']
+        request.api_key_id = result['api_key_id']
+        
+        return f(*args, **kwargs)
+    
+    return decorated
+
+
+# ============================================================================
+# API Key 验证中间件（保留兼容）
 # ============================================================================
 
 def require_api_key(f):
@@ -213,9 +515,9 @@ def require_api_key(f):
 from main import DashScopeClient, Config
 
 @app.route('/api/chat', methods=['POST'])
-@require_api_key
+@require_jwt_token
 def chat():
-    """对话接口（需要 API Key）"""
+    """对话接口（需要 JWT Token）"""
     try:
         data = request.get_json()
         
