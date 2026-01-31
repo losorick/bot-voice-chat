@@ -1,4 +1,5 @@
 import { errorHandler, handleTTSError, handleNetworkError } from '../composables/useError'
+import { useSpeechInterrupt } from '../composables/useSpeechInterrupt'
 
 /**
  * 阿里云 TTS (语音合成) 服务
@@ -9,6 +10,9 @@ class TTSService {
     this.audio = null
     this.onEnd = null
     this.onError = null
+    this.onSpeechInterrupt = null
+    this.speechInterrupt = null
+    this.isPlaying = false
   }
 
   /**
@@ -18,13 +22,52 @@ class TTSService {
    * @param {string} config.token 访问令牌
    * @param {Function} config.onPlayEnd 播放结束回调
    * @param {Function} config.onError 错误回调
+   * @param {Function} config.onSpeechInterrupt 语音打断回调
    */
   init(config) {
     this.appKey = config.appKey
     this.token = config.token
     this.onEnd = config.onEnd
     this.onError = config.onError
+    this.onSpeechInterrupt = config.onSpeechInterrupt
     this.voice = config.voice || 'siqi' // 默认音色
+
+    // 初始化语音打断检测
+    this.speechInterrupt = useSpeechInterrupt({
+      threshold: -50,
+      onSpeechDetected: () => this.handleSpeechInterrupt()
+    })
+  }
+
+  /**
+   * 处理语音打断
+   */
+  handleSpeechInterrupt() {
+    console.log('Speech interrupt detected!')
+    
+    // 停止 TTS 播放
+    this.stop()
+    
+    // 触发打断回调
+    if (this.onSpeechInterrupt) {
+      this.onSpeechInterrupt()
+    }
+  }
+
+  /**
+   * 启用语音打断检测
+   */
+  enableSpeechInterrupt() {
+    if (!this.speechInterrupt) return
+    this.speechInterrupt.startListening()
+  }
+
+  /**
+   * 禁用语音打断检测
+   */
+  disableSpeechInterrupt() {
+    if (!this.speechInterrupt) return
+    this.speechInterrupt.stopListening()
   }
 
   /**
@@ -35,6 +78,10 @@ class TTSService {
     try {
       // 停止当前播放
       this.stop()
+
+      // 启用语音打断检测
+      this.isPlaying = true
+      this.enableSpeechInterrupt()
 
       // 阿里云 TTS API 调用
       const response = await fetch(
@@ -68,10 +115,14 @@ class TTSService {
 
       this.audio = new Audio(url)
       this.audio.onended = () => {
+        this.isPlaying = false
+        this.disableSpeechInterrupt()
         this.onEnd?.()
         URL.revokeObjectURL(url)
       }
       this.audio.onerror = (error) => {
+        this.isPlaying = false
+        this.disableSpeechInterrupt()
         const handledError = handleNetworkError(error)
         this.onError?.(error)
         errorHandler.showError(handledError)
@@ -80,6 +131,8 @@ class TTSService {
       this.audio.play()
 
     } catch (error) {
+      this.isPlaying = false
+      this.disableSpeechInterrupt()
       console.error('TTS error:', error)
       const handledError = error.code ? handleTTSError(error) : handleNetworkError(error)
       this.onError?.(error)

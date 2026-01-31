@@ -18,6 +18,7 @@ const userInput = ref('')
 const isAutoPlay = ref(true)
 const live2dRef = ref(null)
 const showLive2D = ref(true)
+const isSpeechInterrupted = ref(false)
 
 // 滚动到底部
 async function scrollToBottom() {
@@ -43,6 +44,7 @@ async function sendMessage(content = null) {
   chatStore.addMessage('user', text)
   userInput.value = ''
   chatStore.isLoading = true
+  isSpeechInterrupted.value = false
 
   try {
     // 发送消息并获取回复
@@ -61,6 +63,14 @@ async function sendMessage(content = null) {
       
       // TTS 播放结束时停止动画
       TTSService.onEnd = () => {
+        if (live2dRef.value) {
+          live2dRef.value.stopSpeaking()
+        }
+      }
+
+      // 设置语音打断回调
+      TTSService.onSpeechInterrupt = () => {
+        isSpeechInterrupted.value = true
         if (live2dRef.value) {
           live2dRef.value.stopSpeaking()
         }
@@ -106,7 +116,10 @@ onMounted(() => {
     appKey: localStorage.getItem('aliyun_appkey') || '',
     token: localStorage.getItem('aliyun_token') || '',
     onEnd: () => console.log('TTS play ended'),
-    onError: (error) => console.error('TTS error:', error)
+    onError: (error) => console.error('TTS error:', error),
+    onSpeechInterrupt: () => {
+      console.log('Speech interrupted by user')
+    }
   })
 })
 </script>
@@ -164,6 +177,13 @@ onMounted(() => {
         <span class="dot"></span>
         <span class="dot"></span>
       </div>
+
+      <!-- 语音打断提示 -->
+      <Transition name="fade">
+        <div v-if="isSpeechInterrupted" class="interrupt-toast">
+          🛑 语音已中断，请继续说话
+        </div>
+      </Transition>
     </main>
 
     <footer class="chat-footer">
@@ -316,6 +336,31 @@ onMounted(() => {
 @keyframes bounce {
   0%, 80%, 100% { transform: scale(0); }
   40% { transform: scale(1); }
+}
+
+/* 语音打断提示样式 */
+.interrupt-toast {
+  position: fixed;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 82, 82, 0.9);
+  color: white;
+  padding: 12px 24px;
+  border-radius: 24px;
+  font-size: 14px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 .chat-footer {
