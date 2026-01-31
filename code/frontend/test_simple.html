@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Simple Test</title>
+  <script type="importmap">
+    {
+      "imports": {
+        "vue": "/node_modules/.vite/deps/vue.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">{{ message }}</div>
+  <script type="module">
+    import { createApp, ref } from 'vue'
+    createApp({
+      setup() {
+        return { message: ref('Hello World!') }
+      }
+    }).mount('#app')
+  </script>
+</body>
+</html>

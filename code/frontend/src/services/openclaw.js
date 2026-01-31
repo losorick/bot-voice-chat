@@ -10,18 +10,27 @@ class BackendService {
   }
 
   /**
+   * 获取带 API Key 的 URL
+   */
+  getApiUrl(endpoint) {
+    const apiKey = localStorage.getItem('api_key')
+    if (apiKey) {
+      return `${this.baseUrl}${endpoint}/${apiKey}`
+    }
+    return `${this.baseUrl}${endpoint}`
+  }
+
+  /**
    * 验证 API Key
    * @param {string} apiKey 
    * @returns {Promise<boolean>}
    */
   async verifyKey(apiKey) {
     try {
-      // 创建一个临时 axios 实例，不带认证头
-      const response = await fetch(`${this.baseUrl}/api/chat`, {
+      const response = await fetch(this.getApiUrl('/api/chat'), {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': apiKey
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
           messages: [{ role: 'user', content: 'test' }],

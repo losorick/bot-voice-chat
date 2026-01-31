@@ -24,11 +24,7 @@ onMounted(() => {
   ASRService.init({
     appKey: localStorage.getItem('aliyun_appkey') || '',
     onTranscript: (text, isFinal = false) => {
-      if (isFinal) {
-        chatStore.setTranscript(text)
-      } else {
-        chatStore.setTranscript(text)
-      }
+      chatStore.setTranscript(text, isFinal)
     },
     onError: (error) => {
       console.error('ASR Error:', error)
@@ -46,6 +42,7 @@ async function startRecording() {
   if (!isSupported.value) return
   
   chatStore.setListening(true)
+  chatStore.clearTranscript()
   buttonText.value = '监听中...'
   
   // 初始化波形可视化
@@ -103,7 +100,9 @@ function handleClick() {
       <span class="text">{{ buttonText }}</span>
     </button>
     
-    <div v-if="chatStore.currentTranscript" class="transcript">
+    <div v-if="chatStore.currentTranscript" class="transcript" :class="{ 'is-final': chatStore.isFinalTranscript }">
+      <span v-if="!chatStore.isFinalTranscript" class="listening-indicator">•••</span>
+      <span v-else class="final-indicator">✓</span>
       {{ chatStore.currentTranscript }}
     </div>
   </div>
@@ -174,10 +173,51 @@ function handleClick() {
 .transcript {
   max-width: 80%;
   padding: 8px 16px;
-  background: rgba(0, 0, 0, 0.05);
+  background: rgba(102, 126, 234, 0.1);
   border-radius: 12px;
   font-size: 14px;
   color: #666;
   text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  animation: fadeIn 0.3s ease;
+}
+
+.transcript.is-final {
+  background: rgba(76, 175, 80, 0.1);
+  color: #4CAF50;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+.listening-indicator {
+  color: #f5576c;
+  font-weight: bold;
+  animation: blink 1s infinite;
+}
+
+.final-indicator {
+  color: #4CAF50;
+  font-weight: bold;
+}
+
+@keyframes blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>

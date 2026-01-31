@@ -99,10 +99,10 @@ class ASRService {
       const data = JSON.parse(event.data)
       
       if (data.header.name === 'TranscriptionResultChanged') {
-        // 中间结果
-        this.onTranscript?.(data.payload.result)
+        // 中间结果 - 实时转写中
+        this.onTranscript?.(data.payload.result, false)
       } else if (data.header.name === 'TranscriptionCompleted') {
-        // 最终结果
+        // 最终结果 - 转写完成
         this.onTranscript?.(data.payload.result, true)
       }
     }

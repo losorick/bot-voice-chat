@@ -5,6 +5,7 @@ import { useChatStore } from '../stores/chat'
 import { useAuthStore } from '../stores/auth'
 import MessageBubble from '../components/MessageBubble.vue'
 import VoiceInput from '../components/VoiceInput.vue'
+import Live2DCharacter from '../components/Live2DCharacter.vue'
 import BackendService from '../services/openclaw'
 import TTSService from '../services/tts'
 
@@ -15,6 +16,8 @@ const authStore = useAuthStore()
 const messageContainer = ref(null)
 const userInput = ref('')
 const isAutoPlay = ref(true)
+const live2dRef = ref(null)
+const showLive2D = ref(true)
 
 // 滚动到底部
 async function scrollToBottom() {
@@ -49,7 +52,19 @@ async function sendMessage(content = null) {
     
     // 自动播放语音
     if (isAutoPlay.value) {
+      // 触发 Live2D 说话动画
+      if (showLive2D.value && live2dRef.value) {
+        live2dRef.value.startSpeaking()
+      }
+      
       TTSService.speak(reply)
+      
+      // TTS 播放结束时停止动画
+      TTSService.onEnd = () => {
+        if (live2dRef.value) {
+          live2dRef.value.stopSpeaking()
+        }
+      }
     }
 
   } catch (error) {
@@ -109,6 +124,14 @@ onMounted(() => {
           />
           🔊 自动播放
         </label>
+        <label class="live2d-toggle">
+          <input 
+            type="checkbox" 
+            :checked="showLive2D" 
+            @change="showLive2D = !showLive2D"
+          />
+          🎨 Live2D
+        </label>
         <router-link to="/settings" class="settings-btn">
           ⚙️ 设置
         </router-link>
@@ -116,6 +139,10 @@ onMounted(() => {
     </header>
 
     <main class="chat-container" ref="messageContainer">
+      <!-- Live2D 虚拟形象 -->
+      <div v-if="showLive2D" class="live2d-wrapper">
+        <Live2DCharacter ref="live2dRef" />
+      </div>
       <div v-if="chatStore.messages.length === 0" class="welcome">
         <div class="welcome-icon">👋</div>
         <h2>你好！我是 Bot 语音助手</h2>
@@ -200,6 +227,14 @@ onMounted(() => {
   cursor: pointer;
 }
 
+.live2d-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
 .settings-btn {
   padding: 8px 12px;
   background: #f0f0f0;
@@ -221,6 +256,16 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.live2d-wrapper {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 100%);
 }
 
 .welcome {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-API Key 认证管理系统
-用于管理前端访问后端的 API Keys
+API Key 认证管理系统 + 任务队列管理
+用于管理前端访问后端的 API Keys 和任务状态
 """
 
 import os
@@ -12,8 +12,16 @@ import json
 from datetime import datetime
 from functools import wraps
 from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+# 导入任务管理模块
+from task_manager import TaskManager, register_task_routes, ConversationTask
 
 app = Flask(__name__)
+CORS(app)
+
+# 注册任务管理路由
+register_task_routes(app)
 
 # API Keys 存储文件
 KEYS_FILE = 'api_keys.json'
@@ -135,20 +143,35 @@ def require_api_key(f):
     """API Key 验证装饰器"""
     @wraps(f)
     def decorated(*args, **kwargs):
-        # 从 header 获取 API Key
-        api_key = request.headers.get('X-API-Key')
+        # 1. 尝试从 URL 路径后缀获取（格式: /api/xxx/API_KEY）
+        path = request.path.rstrip('/')
+        parts = path.split('/')
+        api_key = None
+        
+        # 检查最后一个部分是否是 API Key（以 bk_ 开头）
+        if len(parts) > 1 and parts[-1].startswith('bk_'):
+            api_key = parts[-1]
+            # 重新设置请求路径，去掉 API Key
+            request.path = '/'.join(parts[:-1])
+        
+        # 2. 如果没有，从查询参数获取
+        if not api_key:
+            api_key = request.args.get('api_key')
+        
+        # 3. 如果没有，从 Header 获取
+        if not api_key:
+            api_key = request.headers.get('X-API-Key')
         
         if not api_key:
             return jsonify({
                 'success': False,
                 'error': 'Missing API Key',
-                'message': '请在请求头中添加 X-API-Key'
+                'message': '请在 URL 后缀、查询参数或 Header 中添加 API Key'
             }), 401
         
         keys = load_keys()
         
-        # 查找匹配的 key（通过哈希比对）
-        key_hash = hash_key(api_key)
+        # 查找匹配的 key
         key_id = None
         
         for kid, kdata in keys.items():
@@ -202,21 +225,39 @@ def chat():
                 'error': 'Missing required parameter: messages'
             }), 400
         
+        # 获取任务名称（通常是对话内容的前几个字）
         messages = data['messages']
-        model = data.get('model', Config.DEFAULT_MODEL)
-        temperature = data.get('temperature', 0.7)
-        max_tokens = data.get('max_tokens', 2000)
+        task_name = "AI对话"
+        if messages:
+            last_message = messages[-1]
+            if isinstance(last_message, dict):
+                content = last_message.get('content', '')[:20]
+                if content:
+                    task_name = f"对话: {content}..."
         
-        client = DashScopeClient(model=model)
-        response = client.chat(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
+        # 使用任务跟踪包装对话
+        with ConversationTask(task_name) as task:
+            task.update(10, "正在理解问题...")
+            
+            model = data.get('model', Config.DEFAULT_MODEL)
+            temperature = data.get('temperature', 0.7)
+            max_tokens = data.get('max_tokens', 2000)
+            
+            client = DashScopeClient(model=model)
+            
+            task.update(30, "正在生成回答...")
+            response = client.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            task.update(90, "回答生成完成...")
         
         return jsonify({
             'success': True,
             'data': response,
+            'task_id': task.id,
             'timestamp': datetime.now().isoformat()
         })
         

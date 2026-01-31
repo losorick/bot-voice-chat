@@ -11,7 +11,7 @@ const apiKey = ref('')
 const verificationStatus = ref('')
 const isVerifying = ref(false)
 
-function async saveSettings() {
+async function saveSettings() {
   if (!apiKey.value.trim()) {
     alert('请输入 API Key')
     return
