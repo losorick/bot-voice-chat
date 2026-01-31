@@ -6,6 +6,9 @@ requests>=2.28.0
 # Web 框架 (可选，用于启动 REST API 服务)
 flask>=2.3.0
 
+# CSRF 防护 (可选，flask-wtf 提供 CSRF 保护)
+# flask-wtf>=1.2.0
+
 # 异步支持 (可选)
 aiohttp>=3.8.0
 

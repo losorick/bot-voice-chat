@@ -93,6 +93,20 @@ except ImportError:
     print("❌ 缺少依赖库，请运行: pip install requests")
     sys.exit(1)
 
+# 尝试导入 secrets 用于 CSRF token 生成
+try:
+    import secrets
+except ImportError:
+    # Python 3.6+ 内置 secrets 模块
+    import random
+    import string
+    def secrets_token_hex(nbytes=None):
+        """生成安全随机十六进制字符串"""
+        if nbytes is None:
+            nbytes = 32
+        return ''.join(random.choices(string.hexdigits, k=nbytes * 2))
+    secrets.token_hex = secrets_token_hex
+
 
 # ============================================================================
 # 安全防护模块
@@ -125,6 +139,146 @@ XSS_PATTERNS = [
 
 # 危险字符黑名单（用于文件名、ID 等）
 DANGEROUS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+
+
+# ============================================================================
+# CSRF 防护模块
+# ============================================================================
+
+# CSRF token 存储（生产环境建议使用 Redis）
+_csrf_tokens: Dict[str, float] = {}
+
+# CSRF token 过期时间（秒）
+CSRF_TOKEN_EXPIRY = 3600  # 1小时
+
+
+class CSRFTokenManager:
+    """CSRF Token 管理器"""
+    
+    @staticmethod
+    def generate_token(session_id: str = "default") -> str:
+        """
+        生成 CSRF token
+        
+        Args:
+            session_id: 会话 ID，用于区分不同来源的 token
+            
+        Returns:
+            生成的 CSRF token
+        """
+        token = secrets.token_hex(32)
+        # 存储 token 及其过期时间
+        _csrf_tokens[token] = datetime.utcnow().timestamp() + CSRF_TOKEN_EXPIRY
+        return token
+    
+    @staticmethod
+    def validate_token(token: str) -> bool:
+        """
+        验证 CSRF token
+        
+        Args:
+            token: 待验证的 token
+            
+        Returns:
+            token 有效返回 True，否则返回 False
+        """
+        if not token:
+            return False
+        
+        # 检查 token 是否在存储中且未过期
+        expiry = _csrf_tokens.get(token)
+        if expiry is None:
+            return False
+        
+        # 检查是否过期
+        if datetime.utcnow().timestamp() > expiry:
+            # 清理过期 token
+            del _csrf_tokens[token]
+            return False
+        
+        return True
+    
+    @staticmethod
+    def refresh_token(token: str) -> str:
+        """
+        刷新 token 的过期时间
+        
+        Args:
+            token: 现有 token
+            
+        Returns:
+            刷新后的 token（原 token 继续有效）
+        """
+        if token in _csrf_tokens:
+            _csrf_tokens[token] = datetime.utcnow().timestamp() + CSRF_TOKEN_EXPIRY
+            return token
+        return None
+    
+    @staticmethod
+    def cleanup_expired_tokens():
+        """清理所有过期的 token"""
+        current_time = datetime.utcnow().timestamp()
+        expired_tokens = [token for token, expiry in _csrf_tokens.items() 
+                         if current_time > expiry]
+        for token in expired_tokens:
+            del _csrf_tokens[token]
+        return len(expired_tokens)
+
+
+# CSRF 验证装饰器
+def csrf_protected(f):
+    """
+    CSRF 保护装饰器
+    
+    用于保护敏感操作接口，需要在请求头或表单中提供有效的 CSRF token
+    
+    使用方式:
+        @csrf_protected
+        @app.route('/sensitive-action', methods=['POST'])
+        def sensitive_action():
+            ...
+    
+    Token 可以通过以下方式传递:
+        - 请求头: X-CSRF-Token
+        - 表单数据: csrf_token
+        - JSON: csrf_token
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 获取 token（从请求头、表单或 JSON 中）
+        token = None
+        
+        # 1. 优先从请求头获取
+        token = request.headers.get('X-CSRF-Token')
+        
+        # 2. 如果请求头没有，从表单数据获取
+        if not token and request.form:
+            token = request.form.get('csrf_token')
+        
+        # 3. 如果表单没有，从 JSON 数据获取
+        if not token and request.is_json:
+            data = request.get_json(silent=True) or {}
+            token = data.get('csrf_token')
+        
+        # 验证 token
+        if not token:
+            return jsonify({
+                'success': False,
+                'error': 'Missing CSRF token',
+                'request_id': getattr(g, 'request_id', '')
+            }), 400
+        
+        if not CSRFTokenManager.validate_token(token):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid or expired CSRF token',
+                'request_id': getattr(g, 'request_id', '')
+            }), 403
+        
+        # Token 验证通过，继续执行原函数
+        return f(*args, **kwargs)
+    
+    return decorated_function
 
 
 class InputValidator:
@@ -629,6 +783,43 @@ if FLASK_AVAILABLE:
             'request_id': g.request_id
         })
     
+    @v1_bp.route('/api/v1/csrf-token', methods=['GET'])
+    def get_csrf_token():
+        """
+        获取 CSRF token
+        
+        GET /api/v1/csrf-token
+        
+        Returns:
+            JSON 包含 CSRF token
+            
+        Example Response:
+            {
+                "success": true,
+                "csrf_token": "abc123...",
+                "expires_in": 3600,
+                "request_id": "xyz789"
+            }
+        """
+        log_with_data("CSRF token requested", request_id=g.request_id)
+        
+        # 生成新的 CSRF token
+        token = CSRFTokenManager.generate_token()
+        
+        # 定期清理过期 token（有一定概率执行）
+        if secrets.randbelow(100) == 0:  # 1% 概率
+            cleaned = CSRFTokenManager.cleanup_expired_tokens()
+            if cleaned > 0:
+                log_with_data(f"Cleaned {cleaned} expired CSRF tokens", 
+                             request_id=g.request_id)
+        
+        return jsonify({
+            'success': True,
+            'csrf_token': token,
+            'expires_in': CSRF_TOKEN_EXPIRY,
+            'request_id': g.request_id
+        })
+    
     @v1_bp.route('/api/v1/chat', methods=['POST'])
     @validate_json_content_type
     def chat():
@@ -839,6 +1030,7 @@ if FLASK_AVAILABLE:
     
     @v1_bp.route('/api/v1/conversations', methods=['POST'])
     @validate_json_content_type
+    @csrf_protected
     def create_conversation():
         """
         创建新对话
@@ -931,6 +1123,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/conversations/<conversation_id>', methods=['DELETE'])
+    @csrf_protected
     def delete_conversation(conversation_id: str):
         """
         删除对话
@@ -967,6 +1160,7 @@ if FLASK_AVAILABLE:
     
     @v1_bp.route('/api/v1/conversations/<conversation_id>/messages', methods=['POST'])
     @validate_json_content_type
+    @csrf_protected
     def add_message(conversation_id: str):
         """
         添加消息到对话
@@ -1112,6 +1306,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/history/clear', methods=['DELETE'])
+    @csrf_protected
     def clear_history():
         """
         清空所有对话历史
