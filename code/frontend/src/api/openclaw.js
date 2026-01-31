@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { loading } from '../composables/useLoading'
 
 const API_PORT = 5002
 
@@ -20,17 +21,28 @@ api.interceptors.request.use(
         config.url = config.url.replace(/\/$/, '') + '/' + apiKey
       }
     }
+    
+    // 显示全局 loading（排除忽略 loading 的请求）
+    if (!config._ignoreLoading) {
+      loading.show()
+    }
+    
     return config
   },
   (error) => {
+    loading.hideAll()
     return Promise.reject(error)
   }
 )
 
 // 响应拦截器
 api.interceptors.response.use(
-  (response) => response.data,
+  (response) => {
+    loading.hide()
+    return response.data
+  },
   (error) => {
+    loading.hide()
     const message = error.response?.data?.message || error.message
     console.error('API Error:', message)
     return Promise.reject(new Error(message))

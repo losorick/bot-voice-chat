@@ -1,7 +1,9 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import TaskStatusCard from './components/TaskStatusCard.vue'
+import LoadingSpinner from './components/LoadingSpinner.vue'
+import { loading } from './composables/useLoading'
 
 const showTaskStatus = ref(true)
 
@@ -12,6 +14,18 @@ function toggleTaskStatus() {
 
 <template>
   <div class="app-container">
+    <!-- 全局 Loading -->
+    <Transition name="fade">
+      <LoadingSpinner 
+        v-if="loading.isLoading()"
+        type="spinner"
+        size="large"
+        color="#3498db"
+        :text="loading.loadingText"
+        fullscreen
+      />
+    </Transition>
+    
     <!-- 任务状态栏（可折叠） -->
     <div class="task-status-section" :class="{ collapsed: !showTaskStatus }">
       <button class="toggle-btn" @click="toggleTaskStatus">
@@ -89,6 +103,16 @@ body {
 }
 
 /* 动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
 .slide-down-enter-active,
 .slide-down-leave-active {
   transition: all 0.3s ease;
