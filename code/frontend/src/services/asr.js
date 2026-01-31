@@ -1,3 +1,5 @@
+import { errorHandler, handleASRError, handleNetworkError } from '../composables/useError'
+
 /**
  * 阿里云 ASR (语音识别) 服务
  * 支持实时语音识别
@@ -64,7 +66,9 @@ class ASRService {
 
     } catch (error) {
       console.error('ASR start error:', error)
+      const handledError = handleNetworkError(error)
       this.onError?.(error)
+      errorHandler.showError(handledError)
     }
   }
 
@@ -109,7 +113,9 @@ class ASRService {
 
     this.websocket.onerror = (error) => {
       console.error('WebSocket error:', error)
+      const handledError = handleASRError(error)
       this.onError?.(error)
+      errorHandler.showError(handledError)
     }
 
     this.websocket.onclose = () => {

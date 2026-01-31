@@ -3,12 +3,19 @@ import { ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import TaskStatusCard from './components/TaskStatusCard.vue'
 import LoadingSpinner from './components/LoadingSpinner.vue'
+import ErrorToast from './components/ErrorToast.vue'
 import { loading } from './composables/useLoading'
+import { errorHandler } from './composables/useError'
 
 const showTaskStatus = ref(true)
 
 function toggleTaskStatus() {
   showTaskStatus.value = !showTaskStatus.value
+}
+
+// 关闭错误提示
+function handleErrorClose(errorId) {
+  errorHandler.hideError(errorId)
 }
 </script>
 
@@ -25,6 +32,17 @@ function toggleTaskStatus() {
         fullscreen
       />
     </Transition>
+    
+    <!-- 错误提示 -->
+    <ErrorToast
+      v-for="error in errorHandler.errorQueue.value"
+      :key="error.id"
+      :visible="true"
+      :message="error.message"
+      :type="error.type"
+      :duration="error.duration"
+      @close="handleErrorClose(error.id)"
+    />
     
     <!-- 任务状态栏（可折叠） -->
     <div class="task-status-section" :class="{ collapsed: !showTaskStatus }">

@@ -1,3 +1,5 @@
+import { errorHandler, handleTTSError, handleNetworkError } from '../composables/useError'
+
 /**
  * 阿里云 TTS (语音合成) 服务
  */
@@ -56,7 +58,9 @@ class TTSService {
       )
 
       if (!response.ok) {
-        throw new Error('TTS request failed')
+        const error = new Error('TTS request failed')
+        error.code = response.status
+        throw error
       }
 
       const blob = await response.blob()
@@ -68,14 +72,18 @@ class TTSService {
         URL.revokeObjectURL(url)
       }
       this.audio.onerror = (error) => {
+        const handledError = handleNetworkError(error)
         this.onError?.(error)
+        errorHandler.showError(handledError)
       }
 
       this.audio.play()
 
     } catch (error) {
       console.error('TTS error:', error)
+      const handledError = error.code ? handleTTSError(error) : handleNetworkError(error)
       this.onError?.(error)
+      errorHandler.showError(handledError)
     }
   }
 
