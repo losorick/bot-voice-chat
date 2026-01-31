@@ -320,6 +320,9 @@ except ImportError:
 if FLASK_AVAILABLE:
     from flask import Flask, request, jsonify, g, Blueprint
     
+    # 导入历史管理器
+    from history_manager import get_history_manager
+    
     # 初始化日志
     logger = setup_logging()
     
@@ -412,12 +415,42 @@ if FLASK_AVAILABLE:
                 max_tokens=max_tokens
             )
             
+            # 提取响应内容
+            output = response.get('output', {})
+            assistant_text = output.get('text', '')
+            usage = response.get('usage', {})
+            input_tokens = usage.get('input_tokens', 0)
+            output_tokens = usage.get('output_tokens', 0)
+            
+            # 保存到历史记录（如果有 conversation_id）
+            conversation_id = data.get('conversation_id')
+            if conversation_id:
+                history_manager = get_history_manager()
+                # 添加用户消息
+                for msg in messages:
+                    if msg['role'] == 'user':
+                        history_manager.add_message(
+                            conversation_id=conversation_id,
+                            role='user',
+                            content=msg['content'],
+                            token_count=input_tokens
+                        )
+                        break
+                # 添加助手回复
+                history_manager.add_message(
+                    conversation_id=conversation_id,
+                    role='assistant',
+                    content=assistant_text,
+                    token_count=output_tokens
+                )
+            
             log_with_data("Chat response generated", request_id=request_id,
                          extra_data={'model': model, 'success': True})
             
             return jsonify({
                 'success': True,
                 'data': response,
+                'conversation_id': conversation_id,
                 'timestamp': datetime.now().isoformat(),
                 'request_id': request_id
             })
@@ -451,6 +484,223 @@ if FLASK_AVAILABLE:
             'base_url': Config.DASHSCOPE_BASE_URL,
             'default_model': Config.DEFAULT_MODEL,
             'supported_models': Config.SUPPORTED_MODELS,
+            'request_id': g.request_id
+        })
+    
+    # ========== 对话历史管理 API ==========
+    
+    @v1_bp.route('/api/v1/conversations', methods=['GET'])
+    def list_conversations():
+        """
+        获取对话列表
+        
+        GET /api/v1/conversations
+        Query params:
+            limit: 返回数量限制 (默认 20)
+            offset: 偏移量 (默认 0)
+        """
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        history_manager = get_history_manager()
+        result = history_manager.get_conversations(limit=limit, offset=offset)
+        
+        return jsonify({
+            'success': True,
+            'data': result,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/conversations', methods=['POST'])
+    def create_conversation():
+        """
+        创建新对话
+        
+        POST /api/v1/conversations
+        Body:
+            title: 对话标题
+            system_prompt: 系统提示词
+        """
+        data = request.get_json() or {}
+        
+        title = data.get('title')
+        system_prompt = data.get('system_prompt')
+        
+        history_manager = get_history_manager()
+        conversation = history_manager.create_conversation(
+            title=title,
+            system_prompt=system_prompt
+        )
+        
+        log_with_data("Conversation created", request_id=g.request_id,
+                     extra_data={'conversation_id': conversation['id']})
+        
+        return jsonify({
+            'success': True,
+            'data': conversation,
+            'request_id': g.request_id
+        }), 201
+    
+    @v1_bp.route('/api/v1/conversations/<conversation_id>', methods=['GET'])
+    def get_conversation(conversation_id: str):
+        """
+        获取对话详情
+        
+        GET /api/v1/conversations/<conversation_id>
+        """
+        history_manager = get_history_manager()
+        conversation = history_manager.get_conversation(conversation_id)
+        
+        if conversation is None:
+            return jsonify({
+                'success': False,
+                'error': '对话不存在',
+                'request_id': g.request_id
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'data': conversation,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/conversations/<conversation_id>', methods=['DELETE'])
+    def delete_conversation(conversation_id: str):
+        """
+        删除对话
+        
+        DELETE /api/v1/conversations/<conversation_id>
+        """
+        history_manager = get_history_manager()
+        success = history_manager.delete_conversation(conversation_id)
+        
+        if success:
+            log_with_data("Conversation deleted", request_id=g.request_id,
+                         extra_data={'conversation_id': conversation_id})
+            return jsonify({
+                'success': True,
+                'message': '对话已删除',
+                'request_id': g.request_id
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': '对话不存在',
+                'request_id': g.request_id
+            }), 404
+    
+    @v1_bp.route('/api/v1/conversations/<conversation_id>/messages', methods=['POST'])
+    def add_message(conversation_id: str):
+        """
+        添加消息到对话
+        
+        POST /api/v1/conversations/<conversation_id>/messages
+        Body:
+            role: 角色 (user/assistant/system)
+            content: 消息内容
+            token_count: Token 数量（可选）
+        """
+        data = request.get_json()
+        
+        if not data or 'content' not in data:
+            return jsonify({
+                'success': False,
+                'error': '缺少必需参数: content',
+                'request_id': g.request_id
+            }), 400
+        
+        role = data.get('role', 'user')
+        content = data.get('content')
+        token_count = data.get('token_count')
+        
+        history_manager = get_history_manager()
+        message = history_manager.add_message(
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            token_count=token_count
+        )
+        
+        if message is None:
+            return jsonify({
+                'success': False,
+                'error': '对话不存在',
+                'request_id': g.request_id
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'data': message,
+            'request_id': g.request_id
+        }), 201
+    
+    @v1_bp.route('/api/v1/conversations/<conversation_id>/export', methods=['GET'])
+    def export_conversation(conversation_id: str):
+        """
+        导出对话内容
+        
+        GET /api/v1/conversations/<conversation_id>/export
+        Query params:
+            format: 导出格式 (json/text, 默认 json)
+        """
+        format_type = request.args.get('format', 'json')
+        
+        history_manager = get_history_manager()
+        content = history_manager.export_conversation(
+            conversation_id=conversation_id,
+            format=format_type
+        )
+        
+        if content is None:
+            return jsonify({
+                'success': False,
+                'error': '对话不存在',
+                'request_id': g.request_id
+            }), 404
+        
+        # 根据格式返回响应
+        if format_type == 'text':
+            return content, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+        else:
+            return jsonify({
+                'success': True,
+                'data': json.loads(content),
+                'request_id': g.request_id
+            })
+    
+    @v1_bp.route('/api/v1/history/stats', methods=['GET'])
+    def get_history_stats():
+        """
+        获取历史统计信息
+        
+        GET /api/v1/history/stats
+        """
+        history_manager = get_history_manager()
+        stats = history_manager.get_statistics()
+        
+        return jsonify({
+            'success': True,
+            'data': stats,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/history/clear', methods=['DELETE'])
+    def clear_history():
+        """
+        清空所有对话历史
+        
+        DELETE /api/v1/history/clear
+        """
+        history_manager = get_history_manager()
+        count = history_manager.clear_all()
+        
+        log_with_data("History cleared", request_id=g.request_id,
+                     extra_data={'deleted_count': count})
+        
+        return jsonify({
+            'success': True,
+            'message': f'已清空 {count} 条对话记录',
+            'deleted_count': count,
             'request_id': g.request_id
         })
     
