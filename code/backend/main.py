@@ -17,8 +17,73 @@ import os
 import sys
 import json
 import time
+import uuid
+import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
+from functools import wraps
+
+# ============================================================================
+# 结构化日志配置
+# ============================================================================
+
+class JSONFormatter(logging.Formatter):
+    """JSON 格式日志格式化器"""
+    
+    def format(self, record):
+        log_obj = {
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'level': record.levelname,
+            'message': record.getMessage(),
+            'logger': record.name,
+            'module': record.module,
+            'function': record.funcName,
+            'line': record.lineno,
+        }
+        if hasattr(record, 'request_id') and record.request_id:
+            log_obj['request_id'] = record.request_id
+        if hasattr(record, 'extra_data') and record.extra_data:
+            log_obj['data'] = record.extra_data
+        return json.dumps(log_obj)
+
+
+def setup_logging():
+    """初始化结构化日志配置"""
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # 清除已有处理器
+    logger.handlers = []
+    
+    # 控制台处理器
+    handler = logging.StreamHandler()
+    handler.setFormatter(JSONFormatter())
+    logger.addHandler(handler)
+    
+    return logger
+
+
+def get_request_id():
+    """生成请求 ID"""
+    return str(uuid.uuid4())[:8]
+
+
+def log_with_data(msg, level=logging.INFO, extra_data=None, request_id=None):
+    """
+    结构化日志输出
+    
+    Args:
+        msg: 日志消息
+        level: 日志级别
+        extra_data: 附加数据 (dict)
+        request_id: 请求 ID
+    """
+    logger = logging.getLogger()
+    extra = {'request_id': request_id or getattr(logger, 'request_id', None)}
+    if extra_data:
+        extra['extra_data'] = extra_data
+    
+    logger.log(level, msg, extra=extra)
 
 # 尝试导入 requests，如果不存在则提示安装
 try:
@@ -246,14 +311,17 @@ class DashScopeClient:
 # ============================================================================
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, request, jsonify, g
     FLASK_AVAILABLE = True
 except ImportError:
     FLASK_AVAILABLE = False
     print("⚠️ Flask 未安装，运行测试需要安装: pip install flask")
 
 if FLASK_AVAILABLE:
-    from flask import Flask, request, jsonify, Blueprint
+    from flask import Flask, request, jsonify, g, Blueprint
+    
+    # 初始化日志
+    logger = setup_logging()
     
     # 创建 v1 蓝图
     v1_bp = Blueprint('v1', __name__)
@@ -268,13 +336,30 @@ if FLASK_AVAILABLE:
             _client = DashScopeClient()
         return _client
     
+    @v1_bp.before_request
+    def before_request():
+        """请求前置处理：生成请求 ID"""
+        g.request_id = get_request_id()
+        logger.request_id = g.request_id
+        log_with_data(f"Incoming request: {request.method} {request.path}", 
+                     level=logging.INFO, 
+                     request_id=g.request_id)
+    
+    @v1_bp.after_request
+    def after_request(response):
+        """请求后置处理：添加请求 ID 到响应头"""
+        response.headers['X-Request-ID'] = getattr(g, 'request_id', '')
+        return response
+    
     @v1_bp.route('/health', methods=['GET'])
     def health_check():
         """健康检查接口"""
+        log_with_data("Health check requested", request_id=g.request_id)
         return jsonify({
             'status': 'ok',
             'timestamp': datetime.now().isoformat(),
-            'service': 'dashscope-api'
+            'service': 'dashscope-api',
+            'request_id': g.request_id
         })
     
     @v1_bp.route('/api/v1/chat', methods=['POST'])
@@ -295,19 +380,29 @@ if FLASK_AVAILABLE:
             "max_tokens": 2000
         }
         """
+        request_id = g.request_id
+        log_with_data("Chat request received", request_id=request_id, 
+                     extra_data={'method': request.method, 'path': request.path})
+        
         try:
             data = request.get_json()
             
             # 参数验证
             if not data or 'messages' not in data:
+                log_with_data("Missing required parameter: messages", 
+                             level=logging.WARNING, request_id=request_id)
                 return jsonify({
-                    'error': 'Missing required parameter: messages'
+                    'error': 'Missing required parameter: messages',
+                    'request_id': request_id
                 }), 400
             
             messages = data['messages']
             model = data.get('model', Config.DEFAULT_MODEL)
             temperature = data.get('temperature', 0.7)
             max_tokens = data.get('max_tokens', 2000)
+            
+            log_with_data("Calling DashScope API", request_id=request_id,
+                         extra_data={'model': model, 'temperature': temperature})
             
             # 创建客户端并调用 API
             client = DashScopeClient(model=model)
@@ -317,34 +412,46 @@ if FLASK_AVAILABLE:
                 max_tokens=max_tokens
             )
             
+            log_with_data("Chat response generated", request_id=request_id,
+                         extra_data={'model': model, 'success': True})
+            
             return jsonify({
                 'success': True,
                 'data': response,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'request_id': request_id
             })
             
         except Exception as e:
+            log_with_data(f"Chat error: {str(e)}", 
+                         level=logging.ERROR, request_id=request_id,
+                         extra_data={'error_type': type(e).__name__})
             return jsonify({
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'request_id': request_id
             }), 500
     
     @v1_bp.route('/api/v1/models', methods=['GET'])
     def list_models():
         """获取支持的模型列表"""
+        log_with_data("Models list requested", request_id=g.request_id)
         return jsonify({
             'models': Config.SUPPORTED_MODELS,
-            'default': Config.DEFAULT_MODEL
+            'default': Config.DEFAULT_MODEL,
+            'request_id': g.request_id
         })
     
     @v1_bp.route('/api/v1/config', methods=['GET'])
     def get_config():
         """获取当前配置（不包含敏感信息）"""
+        log_with_data("Config requested", request_id=g.request_id)
         return jsonify({
             'api_key_configured': bool(Config.DASHSCOPE_API_KEY),
             'base_url': Config.DASHSCOPE_BASE_URL,
             'default_model': Config.DEFAULT_MODEL,
-            'supported_models': Config.SUPPORTED_MODELS
+            'supported_models': Config.SUPPORTED_MODELS,
+            'request_id': g.request_id
         })
     
     # 注册蓝图到 Flask 应用
@@ -553,6 +660,10 @@ def run_all_tests():
 
 def main():
     """主程序入口"""
+    # 初始化结构化日志
+    logger = setup_logging()
+    logger.info("Application starting...")
+    
     import argparse
     
     parser = argparse.ArgumentParser(
@@ -600,6 +711,7 @@ def main():
         print(response.get('output', {}).get('text', '无响应'))
     elif args.server:
         # 启动 Web 服务
+        logger.info("Starting Flask server", extra={'extra_data': {'port': args.port}})
         print(f"\n🚀 启动 Web 服务...")
         print(f"   端口: {args.port}")
         print(f"   健康检查: http://localhost:{args.port}/api/v1/health")
