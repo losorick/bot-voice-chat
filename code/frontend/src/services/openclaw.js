@@ -27,7 +27,7 @@ class BackendService {
    */
   async verifyKey(apiKey) {
     try {
-      const response = await fetch(this.getApiUrl('/api/chat'), {
+      const response = await fetch(this.getApiUrl('/api/v1/chat'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -56,7 +56,7 @@ class BackendService {
    */
   async sendMessage(message) {
     try {
-      const response = await api.post('/api/chat', {
+      const response = await api.post('/api/v1/chat', {
         messages: [{ role: 'user', content: message }]
       })
       
@@ -76,7 +76,7 @@ class BackendService {
    */
   async getModels() {
     try {
-      const response = await api.get('/api/models')
+      const response = await api.get('/api/v1/models')
       return response
     } catch (error) {
       console.error('getModels error:', error)

@@ -253,7 +253,10 @@ except ImportError:
     print("⚠️ Flask 未安装，运行测试需要安装: pip install flask")
 
 if FLASK_AVAILABLE:
-    app = Flask(__name__)
+    from flask import Flask, request, jsonify, Blueprint
+    
+    # 创建 v1 蓝图
+    v1_bp = Blueprint('v1', __name__)
     
     # 全局客户端实例
     _client: Optional[DashScopeClient] = None
@@ -265,7 +268,7 @@ if FLASK_AVAILABLE:
             _client = DashScopeClient()
         return _client
     
-    @app.route('/health', methods=['GET'])
+    @v1_bp.route('/health', methods=['GET'])
     def health_check():
         """健康检查接口"""
         return jsonify({
@@ -274,7 +277,7 @@ if FLASK_AVAILABLE:
             'service': 'dashscope-api'
         })
     
-    @app.route('/api/chat', methods=['POST'])
+    @v1_bp.route('/api/v1/chat', methods=['POST'])
     def chat():
         """
         对话接口
@@ -326,7 +329,7 @@ if FLASK_AVAILABLE:
                 'error': str(e)
             }), 500
     
-    @app.route('/api/models', methods=['GET'])
+    @v1_bp.route('/api/v1/models', methods=['GET'])
     def list_models():
         """获取支持的模型列表"""
         return jsonify({
@@ -334,7 +337,7 @@ if FLASK_AVAILABLE:
             'default': Config.DEFAULT_MODEL
         })
     
-    @app.route('/api/config', methods=['GET'])
+    @v1_bp.route('/api/v1/config', methods=['GET'])
     def get_config():
         """获取当前配置（不包含敏感信息）"""
         return jsonify({
@@ -343,6 +346,10 @@ if FLASK_AVAILABLE:
             'default_model': Config.DEFAULT_MODEL,
             'supported_models': Config.SUPPORTED_MODELS
         })
+    
+    # 注册蓝图到 Flask 应用
+    app = Flask(__name__)
+    app.register_blueprint(v1_bp)
 
 
 # ============================================================================
@@ -595,8 +602,8 @@ def main():
         # 启动 Web 服务
         print(f"\n🚀 启动 Web 服务...")
         print(f"   端口: {args.port}")
-        print(f"   健康检查: http://localhost:{args.port}/health")
-        print(f"   对话接口: POST http://localhost:{args.port}/api/chat")
+        print(f"   健康检查: http://localhost:{args.port}/api/v1/health")
+        print(f"   对话接口: POST http://localhost:{args.port}/api/v1/chat")
         app.run(host='0.0.0.0', port=args.port, debug=True)
     else:
         # 默认运行测试
