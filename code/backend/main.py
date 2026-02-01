@@ -748,6 +748,9 @@ if FLASK_AVAILABLE:
     # 导入历史管理器
     from history_manager import get_history_manager
     
+    # 导入上下文管理器
+    from context_manager import get_context_manager
+    
     # 导入任务管理器
     from task_manager import register_task_routes
     
@@ -1239,6 +1242,8 @@ if FLASK_AVAILABLE:
             message: 用户消息
             session_label: 会话标签 (默认: voice-chat)
             need_tts: 是否需要 TTS (默认: true)
+            conversation_id: 对话 ID（可选，用于多轮对话上下文管理）
+            system_prompt: 系统提示词（可选，创建新会话时使用）
         
         Returns:
             JSON 包含 AI 回复和 TTS 音频 URL
@@ -1264,11 +1269,63 @@ if FLASK_AVAILABLE:
             session_label = data.get('session_label', 'voice-chat')
             need_tts = data.get('need_tts', True)
             
+            # ========== 多轮对话上下文管理 ==========
+            conversation_id = data.get('conversation_id')
+            system_prompt = data.get('system_prompt')
+            
+            # 获取上下文管理器
+            context_manager = get_context_manager()
+            
+            # 如果没有 conversation_id，创建一个新的
+            if not conversation_id:
+                conversation_id = session_label
+                session_info = context_manager.create_session(
+                    session_id=conversation_id,
+                    system_prompt=system_prompt or "你是一个友好的语音助手，请用简洁的中文回复。"
+                )
+                log_with_data(f"Created new conversation session: {conversation_id}", 
+                             request_id=g.request_id)
+            else:
+                # 获取现有会话
+                session_info = context_manager.get_session(conversation_id)
+                if not session_info:
+                    # 会话不存在，创建新的
+                    session_info = context_manager.create_session(
+                        session_id=conversation_id,
+                        system_prompt=system_prompt or "你是一个友好的语音助手，请用简洁的中文回复。"
+                    )
+                    log_with_data(f"Created new conversation for existing ID: {conversation_id}", 
+                                 request_id=g.request_id)
+            
+            # 获取上下文历史消息
+            context_messages = context_manager.get_messages(conversation_id)
+            log_with_data(f"Context messages count: {len(context_messages)}", 
+                         request_id=g.request_id)
+            
             log_with_data(f"OpenClaw chat request: {message[:50]}...", 
                          request_id=g.request_id)
             
             # ========== 步骤 1: 获取 AI 回复 ==========
-            task_prompt = f"""请处理以下语音对话请求，直接返回回复内容（不要添加任何解释或格式）：
+            # 构建包含上下文的提示词
+            if context_messages:
+                # 构造对话历史
+                history_text = ""
+                for msg in context_messages:
+                    role_name = {'user': '用户', 'assistant': '助手', 'system': '系统'}.get(
+                        msg['role'], msg['role']
+                    )
+                    history_text += f"{role_name}: {msg['content']}\n"
+                
+                task_prompt = f"""请处理以下语音对话请求，直接返回回复内容（不要添加任何解释或格式）：
+
+=== 对话历史 ===
+{history_text}
+=== 当前消息 ===
+用户说：{message}
+
+请根据对话历史，用简短、友好的中文回复，保持对话连贯性。"""
+            else:
+                task_prompt = f"""请处理以下语音对话请求，直接返回回复内容（不要添加任何解释或格式）：
 
 用户说：{message}
 
@@ -1308,9 +1365,14 @@ if FLASK_AVAILABLE:
             
             log_with_data(f"AI reply: {reply[:100]}...", request_id=g.request_id)
             
+            # ========== 保存用户消息和助手回复到上下文 ==========
+            context_manager.add_message(conversation_id, 'user', message)
+            context_manager.add_message(conversation_id, 'assistant', reply)
+            
             response_data = {
                 'success': True,
                 'reply': reply,
+                'conversation_id': conversation_id,
                 'request_id': g.request_id
             }
             
@@ -1440,6 +1502,299 @@ if FLASK_AVAILABLE:
                 'error': str(e),
                 'request_id': g.request_id
             }), 500
+    
+    # ========== 多轮对话上下文管理 API ==========
+    
+    @v1_bp.route('/api/v1/context/sessions', methods=['GET'])
+    def list_context_sessions():
+        """
+        获取所有上下文会话列表
+        
+        GET /api/v1/context/sessions
+        
+        Returns:
+            JSON 包含所有会话列表
+        """
+        context_manager = get_context_manager()
+        sessions = context_manager.get_all_sessions()
+        stats = context_manager.get_statistics()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'sessions': sessions,
+                'statistics': stats
+            },
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/context/sessions', methods=['POST'])
+    @validate_json_content_type
+    def create_context_session():
+        """
+        创建新上下文会话
+        
+        POST /api/v1/context/sessions
+        Body:
+            session_id: 会话 ID（可选）
+            system_prompt: 系统提示词（可选）
+        
+        Returns:
+            JSON 包含新创建的会话信息
+        """
+        data = request.get_json() or {}
+        
+        session_id = data.get('session_id')
+        system_prompt = data.get('system_prompt')
+        
+        # 验证并清理 system_prompt（如果有）
+        if system_prompt:
+            try:
+                system_prompt = validator.validate_string(
+                    system_prompt, 
+                    field_name='system_prompt', 
+                    max_length=10000
+                )
+            except ValueError as e:
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'request_id': g.request_id
+                }), 400
+        
+        context_manager = get_context_manager()
+        session = context_manager.create_session(
+            session_id=session_id,
+            system_prompt=system_prompt or "你是一个友好的语音助手，请用简洁的中文回复。"
+        )
+        
+        log_with_data("Context session created", request_id=g.request_id,
+                     extra_data={'session_id': session['id']})
+        
+        return jsonify({
+            'success': True,
+            'data': session,
+            'request_id': g.request_id
+        }), 201
+    
+    @v1_bp.route('/api/v1/context/sessions/<session_id>', methods=['GET'])
+    def get_context_session(session_id: str):
+        """
+        获取会话上下文信息
+        
+        GET /api/v1/context/sessions/<session_id>
+        
+        Returns:
+            JSON 包含会话信息和消息列表
+        """
+        # 验证 session_id 格式
+        if not session_id or len(session_id) < 1:
+            return jsonify({
+                'success': False,
+                'error': '无效的 session_id',
+                'request_id': g.request_id
+            }), 400
+        
+        context_manager = get_context_manager()
+        session = context_manager.get_session(session_id)
+        
+        if session is None:
+            return jsonify({
+                'success': False,
+                'error': '会话不存在',
+                'request_id': g.request_id
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'data': session,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/context/sessions/<session_id>/messages', methods=['GET'])
+    def get_context_messages(session_id: str):
+        """
+        获取会话消息列表（API 格式）
+        
+        GET /api/v1/context/sessions/<session_id>/messages
+        
+        Returns:
+            JSON 包含消息列表
+        """
+        # 验证 session_id 格式
+        if not session_id or len(session_id) < 1:
+            return jsonify({
+                'success': False,
+                'error': '无效的 session_id',
+                'request_id': g.request_id
+            }), 400
+        
+        context_manager = get_context_manager()
+        messages = context_manager.get_messages(session_id)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'session_id': session_id,
+                'messages': messages,
+                'count': len(messages)
+            },
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/context/sessions/<session_id>', methods=['DELETE'])
+    def delete_context_session(session_id: str):
+        """
+        删除会话上下文
+        
+        DELETE /api/v1/context/sessions/<session_id>
+        
+        Returns:
+            JSON 包含操作结果
+        """
+        # 验证 session_id 格式
+        if not session_id or len(session_id) < 1:
+            return jsonify({
+                'success': False,
+                'error': '无效的 session_id',
+                'request_id': g.request_id
+            }), 400
+        
+        context_manager = get_context_manager()
+        success = context_manager.delete_session(session_id)
+        
+        if success:
+            log_with_data("Context session deleted", request_id=g.request_id,
+                         extra_data={'session_id': session_id})
+            return jsonify({
+                'success': True,
+                'message': '会话已删除',
+                'request_id': g.request_id
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': '会话不存在',
+                'request_id': g.request_id
+            }), 404
+    
+    @v1_bp.route('/api/v1/context/sessions/<session_id>/messages', methods=['POST'])
+    @validate_json_content_type
+    def add_context_message(session_id: str):
+        """
+        添加消息到会话
+        
+        POST /api/v1/context/sessions/<session_id>/messages
+        Body:
+            role: 角色 (user/assistant/system)
+            content: 消息内容
+        
+        Returns:
+            JSON 包含添加的消息
+        """
+        # 验证 session_id 格式
+        if not session_id or len(session_id) < 1:
+            return jsonify({
+                'success': False,
+                'error': '无效的 session_id',
+                'request_id': g.request_id
+            }), 400
+        
+        data = request.get_json()
+        
+        if not data or 'content' not in data:
+            return jsonify({
+                'success': False,
+                'error': '缺少必需参数: content',
+                'request_id': g.request_id
+            }), 400
+        
+        # 验证并清理 content
+        try:
+            content = validator.validate_string(
+                data['content'], 
+                field_name='content',
+                max_length=50000
+            )
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
+        # 验证 role
+        role = data.get('role', 'user')
+        try:
+            role = validator.validate_role(role)
+        except ValueError as e:
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 400
+        
+        context_manager = get_context_manager()
+        message = context_manager.add_message(
+            session_id=session_id,
+            role=role,
+            content=validator.sanitize_string(content)
+        )
+        
+        if message is None:
+            return jsonify({
+                'success': False,
+                'error': '会话不存在',
+                'request_id': g.request_id
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'data': message,
+            'request_id': g.request_id
+        }), 201
+    
+    @v1_bp.route('/api/v1/context/clear', methods=['DELETE'])
+    def clear_all_context():
+        """
+        清空所有上下文会话
+        
+        DELETE /api/v1/context/clear
+        
+        Returns:
+            JSON 包含清空的会话数量
+        """
+        context_manager = get_context_manager()
+        count = context_manager.clear_all()
+        
+        log_with_data("All context sessions cleared", request_id=g.request_id,
+                     extra_data={'deleted_count': count})
+        
+        return jsonify({
+            'success': True,
+            'message': f'已清空 {count} 个会话',
+            'deleted_count': count,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/context/stats', methods=['GET'])
+    def get_context_stats():
+        """
+        获取上下文统计信息
+        
+        GET /api/v1/context/stats
+        
+        Returns:
+            JSON 包含统计信息
+        """
+        context_manager = get_context_manager()
+        stats = context_manager.get_statistics()
+        
+        return jsonify({
+            'success': True,
+            'data': stats,
+            'request_id': g.request_id
+        })
     
     # ========== 对话历史管理 API ==========
     
