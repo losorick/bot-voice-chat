@@ -50,3 +50,6 @@ api_keys.json
 
 # Logs
 *.log
+*.db
+*.json
+conversations_*

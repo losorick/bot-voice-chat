@@ -6,7 +6,7 @@
 功能：
 - 管理多轮对话上下文
 - 上下文窗口管理（限制最大消息数）
-- 内存存储支持
+- 内存存储 + SQLite 持久化支持
 
 作者: Bot Voice Team
 创建时间: 2026-02-02
@@ -17,8 +17,11 @@ import json
 import uuid
 import threading
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from collections import OrderedDict
+
+# 导入持久化存储模块
+from sqlite_storage import SQLiteStorage, get_storage
 
 
 class ContextManager:
@@ -27,6 +30,7 @@ class ContextManager:
     
     支持：
     - 内存存储对话上下文
+    - SQLite 持久化存储
     - 上下文窗口管理（限制最大消息数）
     - 自动清理过期上下文
     """
@@ -35,16 +39,20 @@ class ContextManager:
     DEFAULT_MAX_MESSAGES = 20  # 默认最大消息数
     DEFAULT_SESSION_TIMEOUT = 3600  # 会话超时时间（秒）
     
-    def __init__(self, max_messages: int = None, session_timeout: int = None):
+    def __init__(self, max_messages: int = None, session_timeout: int = None,
+                 persistence_path: str = None, enable_persistence: bool = True):
         """
         初始化上下文管理器
         
         Args:
             max_messages: 每个会话最大消息数（默认 20）
             session_timeout: 会话超时时间（秒，默认 1小时）
+            persistence_path: SQLite 数据库路径（默认：当前目录下的 conversations.db）
+            enable_persistence: 是否启用持久化存储
         """
         self.max_messages = max_messages or self.DEFAULT_MAX_MESSAGES
         self.session_timeout = session_timeout or self.DEFAULT_SESSION_TIMEOUT
+        self.enable_persistence = enable_persistence
         
         # 内存存储：{session_id: {...}}
         self._sessions: Dict[str, Dict[str, Any]] = {}
@@ -52,12 +60,24 @@ class ContextManager:
         # 线程锁
         self._lock = threading.RLock()
         
+        # 初始化持久化存储
+        self._storage: Optional[SQLiteStorage] = None
+        if self.enable_persistence:
+            try:
+                self._storage = get_storage(persistence_path)
+            except Exception as e:
+                print(f"[ContextManager] 初始化持久化存储失败: {e}")
+        
         # 定期清理任务
         self._cleanup_thread: Optional[threading.Thread] = None
         self._running = False
         
         # 启动后台清理任务
         self._start_cleanup_task()
+        
+        # 从持久化存储恢复会话
+        if self._storage:
+            self._restore_sessions()
     
     def _start_cleanup_task(self):
         """启动后台清理任务"""
@@ -78,11 +98,93 @@ class ContextManager:
             # 每分钟检查一次
             threading.sleep(60)
     
+    def _restore_sessions(self):
+        """从持久化存储恢复会话"""
+        if not self._storage:
+            return
+        
+        try:
+            # 获取最近的对话记录
+            conversations = self._storage.get_recent_conversations(limit=1000)
+            
+            for conv in conversations:
+                session_id = conv.get('session_id')
+                if session_id and session_id not in self._sessions:
+                    # 恢复会话到内存
+                    self._sessions[session_id] = {
+                        'id': session_id,
+                        'system_prompt': conv.get('system_prompt'),
+                        'messages': conv.get('messages', []),
+                        'created_at': conv.get('created_at'),
+                        'updated_at': conv.get('updated_at'),
+                        'message_count': conv.get('message_count', 0),
+                        'token_usage': conv.get('token_usage', {'input': 0, 'output': 0}),
+                        'conversation_id': conv.get('id')  # 关联的对话记录 ID
+                    }
+            
+            print(f"[ContextManager] 从持久化存储恢复了 {len(self._sessions)} 个会话")
+        except Exception as e:
+            print(f"[ContextManager] 恢复会话失败: {e}")
+    
+    def _save_session(self, session_id: str):
+        """保存会话到持久化存储"""
+        if not self._storage:
+            return
+        
+        try:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+            
+            conversation_id = session.get('conversation_id') or f"conv_{session_id}"
+            
+            # 检查是否已存在
+            existing = self._storage.get_conversation(conversation_id)
+            
+            if existing:
+                # 更新
+                self._storage.update_conversation(
+                    conversation_id,
+                    messages=session['messages'],
+                    system_prompt=session.get('system_prompt'),
+                    token_usage=session.get('token_usage')
+                )
+            else:
+                # 创建
+                self._storage.create_conversation(
+                    conversation_id=conversation_id,
+                    session_id=session_id,
+                    messages=session['messages'],
+                    system_prompt=session.get('system_prompt'),
+                    token_usage=session.get('token_usage')
+                )
+                session['conversation_id'] = conversation_id
+        except Exception as e:
+            print(f"[ContextManager] 保存会话失败: {e}")
+    
+    def _delete_from_storage(self, session_id: str):
+        """从持久化存储删除会话"""
+        if not self._storage:
+            return
+        
+        try:
+            session = self._sessions.get(session_id)
+            if session and session.get('conversation_id'):
+                self._storage.delete_conversation(session['conversation_id'])
+        except Exception as e:
+            print(f"[ContextManager] 删除持久化会话失败: {e}")
+    
     def stop(self):
         """停止清理任务"""
         self._running = False
         if self._cleanup_thread:
             self._cleanup_thread.join(timeout=5)
+        
+        # 保存所有会话
+        if self._storage:
+            with self._lock:
+                for session_id in list(self._sessions.keys()):
+                    self._save_session(session_id)
     
     def create_session(self, session_id: str = None, system_prompt: str = None) -> Dict[str, Any]:
         """
@@ -110,6 +212,21 @@ class ContextManager:
             }
             
             self._sessions[session_id] = session
+            
+            # 持久化存储
+            if self._storage:
+                try:
+                    conversation_id = f"conv_{session_id}"
+                    self._storage.create_conversation(
+                        conversation_id=conversation_id,
+                        session_id=session_id,
+                        messages=[],
+                        system_prompt=system_prompt
+                    )
+                    session['conversation_id'] = conversation_id
+                except Exception as e:
+                    print(f"[ContextManager] 创建会话持久化失败: {e}")
+            
             return session
     
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -173,6 +290,10 @@ class ContextManager:
                 kept_messages = session['messages'][-(self.max_messages):]
                 session['messages'] = kept_messages
                 session['message_count'] = len(kept_messages)
+            
+            # 持久化存储
+            if self._storage:
+                self._save_session(session_id)
             
             return message
     
@@ -258,6 +379,9 @@ class ContextManager:
         """
         with self._lock:
             if session_id in self._sessions:
+                # 先从持久化存储删除
+                self._delete_from_storage(session_id)
+                
                 del self._sessions[session_id]
                 return True
             return False
@@ -287,12 +411,26 @@ class ContextManager:
         """
         清空所有会话
         
+        Args:
+            clear_persistence: 是否同时清除持久化存储
+            
         Returns:
             清空的会话数量
         """
         with self._lock:
             count = len(self._sessions)
             self._sessions.clear()
+            
+            # 清除持久化存储
+            if self._storage:
+                try:
+                    # 删除所有对话记录
+                    conversations = self._storage.get_recent_conversations(limit=10000)
+                    for conv in conversations:
+                        self._storage.delete_conversation(conv['id'])
+                except Exception as e:
+                    print(f"[ContextManager] 清除持久化存储失败: {e}")
+            
             return count
     
     def get_statistics(self) -> Dict[str, Any]:
@@ -344,6 +482,99 @@ class ContextManager:
                 }
                 for session in self._sessions.values()
             ]
+    
+    # ========== 持久化存储相关方法 ==========
+    
+    def search_history(self, keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        搜索对话历史
+        
+        Args:
+            keyword: 搜索关键词
+            limit: 返回数量限制
+            
+        Returns:
+            匹配的对话记录列表
+        """
+        if not self._storage:
+            return []
+        
+        return self._storage.search_conversations(keyword, limit=limit)
+    
+    def export_history(self, session_id: str = None, format: str = 'json') -> str:
+        """
+        导出对话历史
+        
+        Args:
+            session_id: 要导出的会话 ID（None 表示导出全部）
+            format: 导出格式 ('json' 或 'jsonl')
+            
+        Returns:
+            导出文件路径
+        """
+        if not self._storage:
+            return ''
+        
+        if session_id:
+            conversations = self._storage.get_conversations_by_session(session_id)
+            conversation_ids = [conv['id'] for conv in conversations]
+            return self._storage.export_to_json(conversation_ids, format=format)
+        else:
+            return self._storage.export_to_json(format=format)
+    
+    def import_history(self, file_path: str) -> Tuple[int, int]:
+        """
+        导入对话历史
+        
+        Args:
+            file_path: 导入文件路径
+            
+        Returns:
+            (成功数, 失败数)
+        """
+        if not self._storage:
+            return 0, 0
+        
+        return self._storage.import_from_json(file_path)
+    
+    def create_backup(self) -> str:
+        """
+        创建持久化存储备份
+        
+        Returns:
+            备份文件路径
+        """
+        if not self._storage:
+            return ''
+        
+        return self._storage.create_backup()
+    
+    def get_storage_statistics(self) -> Dict[str, Any]:
+        """
+        获取持久化存储统计信息
+        
+        Returns:
+            统计信息字典
+        """
+        if not self._storage:
+            return {}
+        
+        return self._storage.get_statistics()
+    
+    def cleanup_old_history(self, days: int = 30) -> int:
+        """
+        清理旧对话历史
+        
+        Args:
+            days: 保留最近多少天的记录
+            
+        Returns:
+            删除的记录数量
+        """
+        if not self._storage:
+            return 0
+        
+        return self._storage.cleanup_old_conversations(days=days)
 
 
 # 全局实例
@@ -351,13 +582,25 @@ _context_manager: Optional[ContextManager] = None
 _context_manager_lock = threading.Lock()
 
 
-def get_context_manager(max_messages: int = None) -> ContextManager:
-    """获取上下文管理器单例"""
+def get_context_manager(max_messages: int = None, 
+                        persistence_path: str = None,
+                        enable_persistence: bool = True) -> ContextManager:
+    """获取上下文管理器单例
+    
+    Args:
+        max_messages: 每个会话最大消息数
+        persistence_path: SQLite 数据库路径
+        enable_persistence: 是否启用持久化存储
+    """
     global _context_manager
     if _context_manager is None:
         with _context_manager_lock:
             if _context_manager is None:
-                _context_manager = ContextManager(max_messages=max_messages)
+                _context_manager = ContextManager(
+                    max_messages=max_messages,
+                    persistence_path=persistence_path,
+                    enable_persistence=enable_persistence
+                )
     return _context_manager
 
 
