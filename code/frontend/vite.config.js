@@ -10,6 +10,12 @@ export default defineConfig({
       '.trycloudflare.com',
       '.serveousercontent.com',
       '.loca.lt'
-    ]
+    ],
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5005',
+        changeOrigin: true
+      }
+    }
   }
 })

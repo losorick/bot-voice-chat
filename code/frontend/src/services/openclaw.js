@@ -6,7 +6,7 @@ import api from '../api/openclaw'
 
 class BackendService {
   constructor() {
-    this.baseUrl = 'http://127.0.0.1:5002'
+    this.baseUrl = 'http://127.0.0.1:5005'
   }
 
   /**

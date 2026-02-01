@@ -19,6 +19,9 @@ const isAutoPlay = ref(true)
 const live2dRef = ref(null)
 const showLive2D = ref(true)
 const isSpeechInterrupted = ref(false)
+const waitAudio = ref(null) // 等待语音 Audio 对象
+const waitTimer = ref(null) // 超时定时器 ID
+const isPlayingWaitAudio = ref(false)
 
 // 滚动到底部
 async function scrollToBottom() {
@@ -26,6 +29,75 @@ async function scrollToBottom() {
   if (messageContainer.value) {
     messageContainer.value.scrollTop = messageContainer.value.scrollHeight
   }
+}
+
+// 播放等待语音（支持不同类型）
+async function playWaitAudio(type = 'waiting') {
+  try {
+    // 停止之前的等待语音
+    stopWaitAudio()
+    
+    // 获取随机等待语音
+    const response = await fetch(`${OpenClawService.baseUrl}/api/v1/wait-audio/random?type=${type}`)
+    const result = await response.json()
+    
+    if (result.code === 200 && result.data) {
+      // 确保 audioUrl 是完整路径
+      const audioUrl = result.data.audioUrl.startsWith('http') || result.data.audioUrl.startsWith('/api') 
+        ? result.data.audioUrl 
+        : `${OpenClawService.baseUrl}${result.data.audioUrl}`
+      console.log(`Playing wait audio [${type}]:`, result.data.text)
+      
+      waitAudio.value = new Audio(audioUrl)
+      waitAudio.value.onended = () => {
+        isPlayingWaitAudio.value = false
+      }
+      waitAudio.value.onerror = () => {
+        console.warn('Wait audio play failed, skipping')
+        isPlayingWaitAudio.value = false
+      }
+      
+      waitAudio.value.play()
+      isPlayingWaitAudio.value = true
+    }
+  } catch (error) {
+    console.warn('Failed to play wait audio:', error)
+  }
+}
+
+// 停止等待语音
+function stopWaitAudio() {
+  if (waitAudio.value) {
+    waitAudio.value.pause()
+    waitAudio.value.currentTime = 0
+    waitAudio.value = null
+  }
+  isPlayingWaitAudio.value = false
+}
+
+// 取消超时定时器
+function clearWaitTimer() {
+  if (waitTimer.value) {
+    clearTimeout(waitTimer.value)
+    waitTimer.value = null
+  }
+}
+
+// 设置等待超时定时器（1分钟 + 随机30-60秒，即90-120秒后播放 waiting 语音）
+function scheduleWaitingAudio() {
+  clearWaitTimer()
+  
+  // 基础延迟 1 分钟 + 随机 30-60 秒 = 90-120 秒
+  const baseDelay = 60 * 1000 // 1 分钟
+  const randomDelay = Math.floor(Math.random() * 30 + 30) * 1000 // 30-60 秒
+  const totalDelay = baseDelay + randomDelay
+  
+  console.log(`Waiting audio will play in ${totalDelay / 1000} seconds`)
+  
+  waitTimer.value = setTimeout(() => {
+    playWaitAudio('waiting')
+    waitTimer.value = null
+  }, totalDelay)
 }
 
 // 发送消息
@@ -39,9 +111,25 @@ async function sendMessage(content = null) {
   chatStore.isLoading = true
   isSpeechInterrupted.value = false
 
+  // ① 发送后立即播放确认类语音
+  playWaitAudio('confirm')
+  
+  // 设置超时定时器（90-120秒后播放 waiting 语音）
+  scheduleWaitingAudio()
+
   try {
     // 通过 OpenClaw 会话获取回复（包含 TTS 音频）
     const result = await OpenClawService.chat(text)
+    
+    // 停止等待语音和定时器
+    stopWaitAudio()
+    clearWaitTimer()
+    
+    // ③ 收到 AI 文本回复后、调用 subagent 总结前播放完成类语音
+    playWaitAudio('completed')
+    
+    // 短暂延迟后继续（让 completed 语音播放完毕）
+    await new Promise(resolve => setTimeout(resolve, 1000))
     
     // 添加 AI 回复
     chatStore.addMessage('assistant', result.reply)
@@ -82,6 +170,9 @@ async function sendMessage(content = null) {
     }
 
   } catch (error) {
+    // 发生错误时也要停止等待语音和定时器
+    stopWaitAudio()
+    clearWaitTimer()
     chatStore.addMessage('assistant', `抱歉，发生了错误: ${error.message}`)
     console.error('Send message error:', error)
   } finally {

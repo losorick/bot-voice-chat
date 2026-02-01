@@ -743,7 +743,7 @@ except ImportError:
     print("⚠️ Flask 未安装，运行测试需要安装: pip install flask")
 
 if FLASK_AVAILABLE:
-    from flask import Flask, request, jsonify, g, make_response, Blueprint, redirect
+    from flask import Flask, request, jsonify, g, make_response, Blueprint, redirect, send_from_directory
     
     # 导入历史管理器
     from history_manager import get_history_manager
@@ -785,6 +785,226 @@ if FLASK_AVAILABLE:
         """请求后置处理：添加请求 ID 到响应头"""
         response.headers['X-Request-ID'] = getattr(g, 'request_id', '')
         return response
+    
+    # ========== 等待语音配置 ==========
+    # 等待语音文件目录
+    WAIT_AUDIO_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 
+        'wait_audio'
+    )
+    
+    # 类型映射文件路径
+    WAIT_TYPES_JSON = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        '..', '..', 'wait_types.json'
+    )
+    
+    def load_wait_types():
+        """加载等待语音类型映射"""
+        try:
+            if os.path.exists(WAIT_TYPES_JSON):
+                with open(WAIT_TYPES_JSON, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            log_with_data(f"Failed to load wait types: {e}", 
+                         level=logging.WARNING, request_id=g.request_id)
+        return {'confirm': [], 'waiting': [], 'completed': []}
+    
+    def get_wait_audio_files(audio_type: str = None):
+        """获取等待语音文件列表
+        
+        Args:
+            audio_type: 类型过滤 (confirm/waiting/completed)，None 则获取所有
+        """
+        if not os.path.exists(WAIT_AUDIO_DIR):
+            return []
+        
+        # 如果指定了类型，从对应子目录获取
+        if audio_type and audio_type in ['confirm', 'waiting', 'completed']:
+            type_dir = os.path.join(WAIT_AUDIO_DIR, audio_type)
+            if os.path.exists(type_dir):
+                base_dir = type_dir
+            else:
+                # 子目录不存在时回退到主目录
+                base_dir = WAIT_AUDIO_DIR
+        else:
+            base_dir = WAIT_AUDIO_DIR
+        
+        files = []
+        for filename in os.listdir(base_dir):
+            if filename.lower().endswith('.wav'):
+                # 移除扩展名作为文本描述
+                text = filename.rsplit('.', 1)[0]
+                # 确定实际路径
+                if base_dir != WAIT_AUDIO_DIR:
+                    audio_url = f'/api/v1/wait-audio/file/{audio_type}/{filename}'
+                else:
+                    audio_url = f'/api/v1/wait-audio/file/{filename}'
+                files.append({
+                    'filename': filename,
+                    'text': text,
+                    'audioUrl': audio_url,
+                    'type': audio_type or 'mixed'
+                })
+        return files
+    
+    def _get_random_wait_audio(audio_type: str = None):
+        """随机获取一个等待语音
+        
+        Args:
+            audio_type: 类型过滤 (confirm/waiting/completed)，None 则从所有类型随机选择
+        """
+        if audio_type and audio_type in ['confirm', 'waiting', 'completed']:
+            # 从指定类型获取
+            files = get_wait_audio_files(audio_type)
+        else:
+            # 从所有类型中先随机选择一个类型，再随机获取一个音频
+            wait_types = load_wait_types()
+            valid_types = [t for t in ['confirm', 'waiting', 'completed'] if wait_types.get(t)]
+            if not valid_types:
+                files = get_wait_audio_files()
+            else:
+                import random
+                selected_type = random.choice(valid_types)
+                files = get_wait_audio_files(selected_type)
+        
+        if not files:
+            return None
+        import random
+        return random.choice(files)
+    
+    @v1_bp.route('/api/v1/wait-audio/file/<path:filename>', methods=['GET'])
+    def serve_wait_audio(filename):
+        """提供等待语音文件访问"""
+        from urllib.parse import unquote
+        from flask import send_file
+        import mimetypes
+        
+        # URL 解码文件名
+        filename = unquote(filename)
+        
+        # 安全检查：防止目录遍历
+        if '..' in filename:
+            return jsonify({
+                'success': False,
+                'error': '无效的文件名',
+                'request_id': g.request_id
+            }), 400
+        
+        # 检查是否在子目录中
+        file_path = None
+        if '/' in filename:
+            parts = filename.split('/')
+            if len(parts) == 2 and parts[0] in ['confirm', 'waiting', 'completed']:
+                subdir = parts[0]
+                sub_filename = parts[1]
+                sub_dir = os.path.join(WAIT_AUDIO_DIR, subdir)
+                if os.path.exists(sub_dir):
+                    # 在目录中查找匹配的文件（忽略大小写）
+                    for f in os.listdir(sub_dir):
+                        if f.lower() == sub_filename.lower():
+                            file_path = os.path.join(sub_dir, f)
+                            break
+        else:
+            # 主目录查找
+            if os.path.exists(WAIT_AUDIO_DIR):
+                for f in os.listdir(WAIT_AUDIO_DIR):
+                    if f.lower() == filename.lower():
+                        file_path = os.path.join(WAIT_AUDIO_DIR, f)
+                        break
+        
+        if file_path and os.path.exists(file_path):
+            # 自动检测 MIME 类型
+            mime_type, _ = mimetypes.guess_type(file_path)
+            if mime_type is None:
+                mime_type = 'audio/wav'
+            return send_file(file_path, mimetype=mime_type)
+        
+        return 'File not found', 404
+    
+    @v1_bp.route('/api/v1/wait-audio/random', methods=['GET'])
+    def get_random_wait_audio():
+        """
+        随机获取一个等待语音
+        
+        GET /api/wait-audio/random
+        GET /api/wait-audio/random?type=confirm
+        GET /api/wait-audio/random?type=waiting
+        GET /api/wait-audio/random?type=completed
+        
+        Query params:
+            type: 音频类型 (confirm/waiting/completed)，可选
+            
+        Returns:
+            JSON 包含随机等待语音信息
+            
+        Example Response:
+            {
+                "code": 200,
+                "data": {
+                    "audioUrl": "/audio/wait/confirm/收到好的.wav",
+                    "text": "收到好的",
+                    "type": "confirm"
+                }
+            }
+        """
+        audio_type = request.args.get('type')
+        
+        # 验证 type 参数
+        if audio_type and audio_type not in ['confirm', 'waiting', 'completed']:
+            return jsonify({
+                'code': 400,
+                'error': '无效的 type 参数，支持的值: confirm, waiting, completed',
+                'request_id': g.request_id
+            }), 400
+        
+        log_with_data(f"Random wait audio requested, type={audio_type}", 
+                     request_id=g.request_id)
+        
+        audio = _get_random_wait_audio(audio_type)
+        
+        if audio:
+            return jsonify({
+                'code': 200,
+                'data': audio,
+                'request_id': g.request_id
+            })
+        else:
+            return jsonify({
+                'code': 404,
+                'error': '没有可用的等待语音文件',
+                'request_id': g.request_id
+            }), 404
+    
+    @v1_bp.route('/api/v1/wait-audio/list', methods=['GET'])
+    def list_wait_audio():
+        """
+        获取所有等待语音文件列表
+        
+        GET /api/wait-audio/list
+        
+        Returns:
+            JSON 包含所有等待语音文件列表
+            
+        Example Response:
+            {
+                "code": 200,
+                "data": [
+                    {"audioUrl": "/audio/wait/收到好的.wav", "text": "收到好的"},
+                    {"audioUrl": "/audio/wait/请稍等.wav", "text": "请稍等"}
+                ]
+            }
+        """
+        log_with_data("Wait audio list requested", request_id=g.request_id)
+        
+        files = get_wait_audio_files()
+        
+        return jsonify({
+            'code': 200,
+            'data': files,
+            'count': len(files),
+            'request_id': g.request_id
+        })
     
     @v1_bp.route('/health', methods=['GET'])
     def health_check():

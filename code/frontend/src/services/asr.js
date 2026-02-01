@@ -92,7 +92,7 @@ class ASRService {
       formData.append('model', 'fun-asr-mtl') // 使用 DashScope Fun-ASR 模型
 
       // 调用后端语音识别接口
-      const response = await fetch('http://localhost:5002/api/v1/asr/recognize', {
+      const response = await fetch('http://localhost:5005/api/v1/asr/recognize', {
         method: 'POST',
         body: formData
       })

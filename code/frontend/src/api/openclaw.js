@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { loading } from '../composables/useLoading'
 
-const API_PORT = 5002
+const API_PORT = 5005
 
 const api = axios.create({
   baseURL: `http://127.0.0.1:${API_PORT}`,
