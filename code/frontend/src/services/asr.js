@@ -2,7 +2,7 @@ import { errorHandler, handleASRError, handleNetworkError } from '../composables
 
 /**
  * 阿里云 ASR (语音识别) 服务
- * 支持实时语音识别
+ * 使用 DashScope 语音识别 API
  */
 
 class ASRService {
@@ -10,26 +10,27 @@ class ASRService {
     this.isRecording = false
     this.mediaRecorder = null
     this.audioContext = null
-    this.websocket = null
+    this.audioChunks = []
     this.onTranscript = null
     this.onError = null
+    this.onStatusChange = null
   }
 
   /**
    * 初始化 ASR 服务
    * @param {Object} config 配置
-   * @param {string} config.appKey 阿里云 App Key
-   * @param {Function} config.onTranscript 实时转写回调
+   * @param {Function} config.onTranscript 转写回调
    * @param {Function} config.onError 错误回调
+   * @param {Function} config.onStatusChange 状态变化回调
    */
   init(config) {
-    this.appKey = config.appKey
     this.onTranscript = config.onTranscript
     this.onError = config.onError
+    this.onStatusChange = config.onStatusChange
   }
 
   /**
-   * 开始录音和识别
+   * 开始录音
    */
   async start() {
     try {
@@ -49,20 +50,25 @@ class ASRService {
 
       const source = this.audioContext.createMediaStreamSource(stream)
       this.mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm'
+        mimeType: 'audio/webm;codecs=opus'
       })
 
-      // 创建 WebSocket 连接
-      this.createWebSocket()
+      this.audioChunks = []
 
       this.mediaRecorder.ondataavailable = (event) => {
-        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-          this.websocket.send(event.data)
+        if (event.data.size > 0) {
+          this.audioChunks.push(event.data)
         }
       }
 
-      this.mediaRecorder.start(3000) // 每3秒发送一次音频数据
+      this.mediaRecorder.onstop = async () => {
+        // 将录音发送到后端进行识别
+        await this.recognize()
+      }
+
+      this.mediaRecorder.start(100) // 每100ms录制一次
       this.isRecording = true
+      this.onStatusChange?.('recording')
 
     } catch (error) {
       console.error('ASR start error:', error)
@@ -73,53 +79,42 @@ class ASRService {
   }
 
   /**
-   * 创建 WebSocket 连接
+   * 发送录音到后端进行识别
    */
-  createWebSocket() {
-    // 阿里云实时语音识别 WebSocket URL
-    const url = `wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1?token=${this.getToken()}`
-    
-    this.websocket = new WebSocket(url, ['oss'])
+  async recognize() {
+    try {
+      const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' })
+      this.audioChunks = [] // 清空缓存
 
-    this.websocket.onopen = () => {
-      // 发送开始事件
-      this.websocket.send(JSON.stringify({
-        header: {
-          namespace: 'SpeechTranscriber',
-          name: 'StartTranscription',
-          appkey: this.appKey
-        },
-        payload: {
-          format: 'pcm',
-          sample_rate: 16000,
-          enable_intermediate_result: true,
-          enable_punctuation_prediction: true,
-          enableInverseTextNormalization: true
-        }
-      }))
-    }
+      // 创建 FormData
+      const formData = new FormData()
+      formData.append('file', audioBlob, 'recording.webm')
+      formData.append('model', 'fun-asr-mtl') // 使用 DashScope Fun-ASR 模型
 
-    this.websocket.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      
-      if (data.header.name === 'TranscriptionResultChanged') {
-        // 中间结果 - 实时转写中
-        this.onTranscript?.(data.payload.result, false)
-      } else if (data.header.name === 'TranscriptionCompleted') {
-        // 最终结果 - 转写完成
-        this.onTranscript?.(data.payload.result, true)
+      // 调用后端语音识别接口
+      const response = await fetch('http://localhost:5002/api/v1/asr/recognize', {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!response.ok) {
+        throw new Error('语音识别请求失败')
       }
-    }
 
-    this.websocket.onerror = (error) => {
-      console.error('WebSocket error:', error)
-      const handledError = handleASRError(error)
-      this.onError?.(error)
-      errorHandler.showError(handledError)
-    }
+      const result = await response.json()
 
-    this.websocket.onclose = () => {
-      console.log('WebSocket closed')
+      if (result.success && result.text) {
+        this.onTranscript?.(result.text, true)
+      }
+
+    } catch (error) {
+      console.error('ASR recognize error:', error)
+      // 如果后端接口不可用，回退到提示用户
+      errorHandler.showError({
+        message: '语音识别服务暂时不可用，请使用文字输入',
+        type: 'warning',
+        duration: 3000
+      })
     }
   }
 
@@ -132,29 +127,19 @@ class ASRService {
       this.mediaRecorder.stream.getTracks().forEach(track => track.stop())
     }
 
-    if (this.websocket) {
-      this.websocket.send(JSON.stringify({
-        header: {
-          namespace: 'SpeechTranscriber',
-          name: 'StopTranscription'
-        }
-      }))
-      this.websocket.close()
-    }
-
     if (this.audioContext) {
       this.audioContext.close()
     }
 
     this.isRecording = false
+    this.onStatusChange?.('stopped')
   }
 
   /**
-   * 获取 Token (实际项目中应该从后端获取)
+   * 获取当前录音状态
    */
-  getToken() {
-    // 这里需要从后端 API 获取 Token
-    return localStorage.getItem('aliyun_token') || ''
+  get isActive() {
+    return this.isRecording
   }
 }
 

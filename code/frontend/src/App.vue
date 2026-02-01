@@ -7,7 +7,7 @@ import ErrorToast from './components/ErrorToast.vue'
 import { loading } from './composables/useLoading'
 import { errorHandler } from './composables/useError'
 
-const showTaskStatus = ref(true)
+const showTaskStatus = ref(false)
 
 function toggleTaskStatus() {
   showTaskStatus.value = !showTaskStatus.value

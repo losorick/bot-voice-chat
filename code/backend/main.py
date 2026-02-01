@@ -24,6 +24,13 @@ from typing import Optional, Dict, Any, List
 from functools import wraps
 from html import escape as html_escape
 
+# 加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ============================================================================
 # 结构化日志配置
 # ============================================================================
@@ -736,16 +743,23 @@ except ImportError:
     print("⚠️ Flask 未安装，运行测试需要安装: pip install flask")
 
 if FLASK_AVAILABLE:
-    from flask import Flask, request, jsonify, g, Blueprint, redirect
+    from flask import Flask, request, jsonify, g, make_response, Blueprint, redirect
     
     # 导入历史管理器
     from history_manager import get_history_manager
+    
+    # 导入任务管理器
+    from task_manager import register_task_routes
     
     # 初始化日志
     logger = setup_logging()
     
     # 创建 v1 蓝图
     v1_bp = Blueprint('v1', __name__)
+    
+    # 临时音频文件目录
+    TEMP_AUDIO_DIR = '/tmp/dashscope_asr_audio'
+    os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
     
     # 全局客户端实例
     _client: Optional[DashScopeClient] = None
@@ -821,12 +835,14 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/chat', methods=['POST'])
+    @v1_bp.route('/api/v1/chat/<path:api_key>', methods=['POST'])
     @validate_json_content_type
-    def chat():
+    def chat(api_key=None):
         """
         对话接口
         
         POST /api/chat
+        POST /api/chat/<api_key>  (URL 后缀携带 API Key)
         Content-Type: application/json
         
         {
@@ -990,6 +1006,220 @@ if FLASK_AVAILABLE:
             'supported_models': Config.SUPPORTED_MODELS,
             'request_id': g.request_id
         })
+    
+    @v1_bp.route('/api/v1/openclaw/chat', methods=['POST'])
+    def openclaw_chat():
+        """
+        通过 OpenClaw 会话处理对话，并总结回复内容用于 TTS
+        
+        POST /api/v1/openclaw/chat
+        Content-Type: application/json
+        
+        Parameters:
+            message: 用户消息
+            session_label: 会话标签 (默认: voice-chat)
+            need_tts: 是否需要 TTS (默认: true)
+        
+        Returns:
+            JSON 包含 AI 回复和 TTS 音频 URL
+        """
+        import subprocess
+        import shlex
+        import urllib.request
+        from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
+        from dashscope.audio.tts_v2.speech_synthesizer import ResultCallback
+        from io import BytesIO
+        import wave
+        
+        try:
+            data = request.get_json()
+            if not data or 'message' not in data:
+                return jsonify({
+                    'success': False,
+                    'error': '缺少消息内容',
+                    'request_id': g.request_id
+                }), 400
+            
+            message = data['message']
+            session_label = data.get('session_label', 'voice-chat')
+            need_tts = data.get('need_tts', True)
+            
+            log_with_data(f"OpenClaw chat request: {message[:50]}...", 
+                         request_id=g.request_id)
+            
+            # ========== 步骤 1: 获取 AI 回复 ==========
+            task_prompt = f"""请处理以下语音对话请求，直接返回回复内容（不要添加任何解释或格式）：
+
+用户说：{message}
+
+请用简短、友好的中文回复。"""
+            
+            cmd = [
+                'openclaw', 'agent',
+                '--message', task_prompt,
+                '--session-id', session_label,
+                '--local',
+                '--timeout', '60'
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=90
+            )
+            
+            if result.returncode != 0:
+                return jsonify({
+                    'success': False,
+                    'error': result.stderr.strip() or 'OpenClaw 执行失败',
+                    'request_id': g.request_id
+                }), 500
+            
+            # 提取 AI 回复
+            reply = result.stdout.strip()
+            if reply.startswith('{') and '"reply"' in reply:
+                import json as json_module
+                try:
+                    data = json_module.loads(reply)
+                    reply = data.get('reply', reply)
+                except:
+                    pass
+            
+            log_with_data(f"AI reply: {reply[:100]}...", request_id=g.request_id)
+            
+            response_data = {
+                'success': True,
+                'reply': reply,
+                'request_id': g.request_id
+            }
+            
+            # ========== 步骤 2: Sub-agent 总结回复（用于 TTS）==========
+            if need_tts:
+                log_with_data("Starting sub-agent to summarize reply for TTS", 
+                             request_id=g.request_id)
+                
+                summarize_prompt = f"""请用 1-2 句话总结以下内容，用于语音播报。要求：
+1. 简洁明了
+2. 保留核心意思
+3. 口语化、自然
+
+内容：
+{reply}
+
+只返回总结后的文字，不要其他内容。"""
+                
+                summarize_cmd = [
+                    'openclaw', 'agent',
+                    '--message', summarize_prompt,
+                    '--session-id', f'{session_label}-tts-summary',
+                    '--local',
+                    '--timeout', '30'
+                ]
+                
+                summary_result = subprocess.run(
+                    summarize_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=45
+                )
+                
+                if summary_result.returncode == 0:
+                    summary = summary_result.stdout.strip()
+                    # 清理 JSON 格式
+                    if summary.startswith('{') and '"reply"' in summary:
+                        try:
+                            import json as json_module
+                            data = json_module.loads(summary)
+                            summary = data.get('reply', summary)
+                        except:
+                            pass
+                    
+                    # 如果总结太长或为空，使用原回复
+                    if not summary or len(summary) > 200:
+                        summary = reply[:200]
+                    
+                    log_with_data(f"TTS summary: {summary}", request_id=g.request_id)
+                    
+                    # ========== 步骤 3: 使用总结内容生成 TTS ==========
+                    log_with_data("Generating TTS audio...", request_id=g.request_id)
+                    
+                    # 在应用上下文中生成 TTS
+                    from flask import current_app
+                    request_id_for_log = g.request_id  # 保存到局部变量
+                    
+                    with current_app.app_context():
+                        # 收集音频数据
+                        audio_chunks = []
+                        
+                        class AudioCallback(ResultCallback):
+                            def on_open(self):
+                                # 不调用 log_with_data，避免上下文问题
+                                pass
+                            
+                            def on_complete(self):
+                                pass
+                            
+                            def on_error(self, message: str):
+                                pass
+                            
+                            def on_close(self):
+                                pass
+                            
+                            def on_data(self, data: bytes) -> None:
+                                audio_chunks.append(data)
+                        
+                        synthesizer = SpeechSynthesizer(
+                            model='cosyvoice-v3-flash',
+                            voice='longhuhu_v3',
+                            format=AudioFormat.PCM_22050HZ_MONO_16BIT,
+                            callback=AudioCallback()
+                        )
+                        
+                        synthesizer.streaming_call(summary)
+                        synthesizer.streaming_complete()
+                        
+                        audio_data = b''.join(audio_chunks)
+                    
+                    if len(audio_data) > 0:
+                        # 创建 WAV 文件
+                        wav_buffer = BytesIO()
+                        with wave.open(wav_buffer, 'wb') as wav_file:
+                            wav_file.setnchannels(1)
+                            wav_file.setsampwidth(2)
+                            wav_file.setframerate(22050)
+                            wav_file.writeframes(audio_data)
+                        
+                        wav_data = wav_buffer.getvalue()
+                        
+                        response_data['tts_summary'] = summary
+                        response_data['tts_audio'] = 'data:audio/wav;base64,' + \
+                            __import__('base64').b64encode(wav_data).decode('ascii')
+                    else:
+                        log_with_data("TTS audio is empty", 
+                                     level=logging.WARNING, request_id=g.request_id)
+                else:
+                    log_with_data(f"Summarize failed: {summary_result.stderr}", 
+                                 level=logging.ERROR, request_id=g.request_id)
+            
+            return jsonify(response_data)
+            
+        except subprocess.TimeoutExpired:
+            log_with_data("OpenClaw timeout", 
+                         level=logging.ERROR, request_id=g.request_id)
+            return jsonify({
+                'success': False,
+                'error': 'OpenClaw 会话超时',
+                'request_id': g.request_id
+            }), 504
+        except Exception as e:
+            log_with_data(f"OpenClaw chat error: {str(e)}", 
+                         level=logging.ERROR, request_id=g.request_id)
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'request_id': g.request_id
+            }), 500
     
     # ========== 对话历史管理 API ==========
     
@@ -1326,9 +1556,323 @@ if FLASK_AVAILABLE:
             'request_id': g.request_id
         })
     
+    @v1_bp.route('/api/v1/config/aliyun', methods=['GET'])
+    def get_aliyun_config():
+        """
+        获取阿里云语音配置（公开信息）
+        
+        GET /api/v1/config/aliyun
+        
+        Returns:
+            JSON 包含 App Key（如果配置了）
+            注意：Token 需要动态获取，不通过此接口返回
+        """
+        app_key = os.environ.get('ALIYUN_APP_KEY', '')
+        
+        return jsonify({
+            'success': True,
+            'config': {
+                'app_key': app_key,
+                'has_config': bool(app_key),
+                'tts_endpoint': 'https://nls-gateway.cn-shanghai.aliyuncs.com/rest/v1/tts',
+                'asr_endpoint': 'wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1'
+            },
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/asr/recognize', methods=['POST'])
+    def asr_recognize():
+        """
+        语音识别接口（通过 DashScope Fun-ASR API）
+        
+        POST /api/v1/asr/recognize
+        Content-Type: multipart/form-data
+        
+        Parameters:
+            file: 音频文件 (wav, mp3, webm, etc.)
+            model: 语音识别模型 (默认: fun-asr-mtl)
+        
+        Returns:
+            JSON 包含识别结果
+        """
+        try:
+            from http import HTTPStatus
+            from dashscope.audio.asr import Transcription
+            from dashscope import Files
+            import urllib.request
+            
+            # 检查是否有音频文件
+            if 'file' not in request.files:
+                return jsonify({
+                    'success': False,
+                    'error': '缺少音频文件',
+                    'request_id': g.request_id
+                }), 400
+            
+            audio_file = request.files['file']
+            
+            # 获取模型名称
+            model = request.form.get('model', 'fun-asr-mtl')
+            
+            # 保存临时文件
+            import uuid
+            filename = f'{uuid.uuid4()}.wav'
+            temp_file_path = os.path.join(TEMP_AUDIO_DIR, filename)
+            audio_file.save(temp_file_path)
+            
+            try:
+                # 上传音频到 DashScope
+                log_with_data(f"Uploading audio to DashScope...", request_id=g.request_id)
+                
+                upload_response = Files.upload(
+                    file_path=temp_file_path,
+                    purpose='transcription'
+                )
+                
+                if upload_response.status_code != HTTPStatus.OK:
+                    return jsonify({
+                        'success': False,
+                        'error': f'音频上传失败: {upload_response.message}',
+                        'request_id': g.request_id
+                    }), 500
+                
+                # 获取文件 URL（从列表中获取）
+                list_response = Files.list(page=1, page_size=1)
+                if list_response.status_code != HTTPStatus.OK or not list_response.output.get('files'):
+                    return jsonify({
+                        'success': False,
+                        'error': '无法获取上传文件信息',
+                        'request_id': g.request_id
+                    }), 500
+                
+                file_url = list_response.output['files'][0]['url']
+                log_with_data(f"Audio uploaded, URL: {file_url[:80]}...", request_id=g.request_id)
+                
+                # 调用 DashScope Fun-ASR API
+                task_response = Transcription.async_call(
+                    model=model,
+                    file_urls=[file_url]
+                )
+                
+                log_with_data(f"ASR task created: {task_response.output.task_id}", 
+                             request_id=g.request_id)
+                
+                # 等待识别结果
+                transcribe_response = Transcription.wait(task=task_response.output.task_id)
+                
+                log_with_data(f"ASR task status: {transcribe_response.output.get('task_status', 'UNKNOWN')}", 
+                             request_id=g.request_id)
+                
+                if transcribe_response.status_code == HTTPStatus.OK:
+                    task_status = transcribe_response.output.get('task_status', '')
+                    if task_status != 'SUCCEEDED':
+                        return jsonify({
+                            'success': False,
+                            'error': f'语音识别任务失败: {task_status}',
+                            'request_id': g.request_id
+                        }), 500
+                    
+                    # 获取转写结果 URL
+                    results = transcribe_response.output.get('results', [])
+                    if not results or 'transcription_url' not in results[0]:
+                        return jsonify({
+                            'success': False,
+                            'error': '无法获取转写结果',
+                            'request_id': g.request_id
+                        }), 500
+                    
+                    result_url = results[0]['transcription_url']
+                    
+                    # 下载并解析结果
+                    result_data = json.loads(urllib.request.urlopen(result_url).read().decode('utf-8'))
+                    
+                    # 提取识别文本
+                    result_text = ''
+                    if result_data.get('transcripts'):
+                        result_text = result_data['transcripts'][0].get('text', '')
+                    
+                    log_with_data(f"ASR result: {result_text}", request_id=g.request_id)
+                    
+                    return jsonify({
+                        'success': True,
+                        'text': result_text,
+                        'model': model,
+                        'request_id': g.request_id
+                    })
+                else:
+                    return jsonify({
+                        'success': False,
+                        'error': f'语音识别失败: {transcribe_response.message}',
+                        'request_id': g.request_id
+                    }), 500
+                    
+            finally:
+                # 清理临时文件
+                try:
+                    os.remove(temp_file_path)
+                except:
+                    pass
+                
+        except KeyError as e:
+            log_with_data(f"ASR KeyError: {str(e)}", 
+                         level=logging.ERROR, request_id=g.request_id)
+            return jsonify({
+                'success': False,
+                'error': f'语音识别响应格式错误: {str(e)}',
+                'request_id': g.request_id
+            }), 500
+        except Exception as e:
+            log_with_data(f"ASR error: {str(e)}", 
+                         level=logging.ERROR, request_id=g.request_id)
+            return jsonify({
+                'success': False,
+                'error': f'语音识别错误: {str(e)}',
+                'request_id': g.request_id
+            }), 500
+
+    @v1_bp.route('/api/v1/tts/synthesize', methods=['POST'])
+    def tts_synthesize():
+        """
+        语音合成接口（通过 DashScope TTS v2 API）
+        
+        POST /api/v1/tts/synthesize
+        Content-Type: application/json
+        
+        Parameters:
+            text: 要合成的文本
+            voice: 音色 (默认: longanyang)
+            format: 音频格式 (默认: pcm_22050hz_mono_16bit)
+        
+        Returns:
+            音频流 (二进制)
+        """
+        try:
+            from io import BytesIO
+            from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
+            from dashscope.audio.tts_v2.speech_synthesizer import ResultCallback
+            
+            # 获取请求参数
+            data = request.get_json()
+            if not data or 'text' not in data:
+                return jsonify({
+                    'success': False,
+                    'error': '缺少文本内容',
+                    'request_id': g.request_id
+                }), 400
+            
+            text = data['text']
+            voice = data.get('voice', 'longanyang')
+            
+            log_with_data(f"TTS request: text={text[:50]}..., voice={voice}", 
+                         request_id=g.request_id)
+            
+            # 收集所有音频数据
+            audio_chunks = []
+            
+            # 定义回调类
+            class AudioCallback(ResultCallback):
+                def on_open(self):
+                    log_with_data("TTS WebSocket connected", request_id=g.request_id)
+                
+                def on_complete(self):
+                    log_with_data("TTS synthesis complete", request_id=g.request_id)
+                
+                def on_error(self, message: str):
+                    log_with_data(f"TTS error: {message}", 
+                                 level=logging.ERROR, request_id=g.request_id)
+                
+                def on_close(self):
+                    log_with_data("TTS WebSocket closed", request_id=g.request_id)
+                
+                def on_data(self, data: bytes) -> None:
+                    audio_chunks.append(data)
+            
+            # 创建合成器并合成语音 (使用 PCM 22050Hz mono 16bit)
+            synthesizer = SpeechSynthesizer(
+                model='cosyvoice-v3-flash',
+                voice=voice,
+                format=AudioFormat.PCM_22050HZ_MONO_16BIT,
+                callback=AudioCallback()
+            )
+            
+            # 流式发送文本
+            synthesizer.streaming_call(text)
+            synthesizer.streaming_complete()
+            
+            # 合并音频数据
+            audio_data = b''.join(audio_chunks)
+            
+            log_with_data(f"TTS audio size: {len(audio_data)} bytes", 
+                         request_id=g.request_id)
+            
+            if len(audio_data) == 0:
+                return jsonify({
+                    'success': False,
+                    'error': '语音合成结果为空',
+                    'request_id': g.request_id
+                }), 500
+            
+            # 返回音频流 (添加 WAV 头)
+            import wave
+            import struct
+            
+            # 创建 WAV 文件
+            wav_buffer = BytesIO()
+            with wave.open(wav_buffer, 'wb') as wav_file:
+                wav_file.setnchannels(1)  # mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(22050)
+                wav_file.writeframes(audio_data)
+            
+            wav_data = wav_buffer.getvalue()
+            
+            response = make_response(wav_data)
+            response.headers['Content-Type'] = 'audio/wav'
+            response.headers['Content-Disposition'] = 'attachment; filename=speech.wav'
+            response.headers['X-Request-ID'] = g.request_id
+            
+            return response
+            
+        except Exception as e:
+            log_with_data(f"TTS error: {str(e)}", 
+                         level=logging.ERROR, request_id=g.request_id)
+            return jsonify({
+                'success': False,
+                'error': f'语音合成错误: {str(e)}',
+                'request_id': g.request_id
+            }), 500
+    
+    @v1_bp.route('/temp_audio/<filename>', methods=['GET'])
+    def serve_temp_audio(filename):
+        """提供临时音频文件访问"""
+        from flask import send_file
+        file_path = os.path.join(TEMP_AUDIO_DIR, filename)
+        if os.path.exists(file_path):
+            response = send_file(file_path, mimetype='audio/webm')
+            # 访问后立即删除
+            @response.call_on_close
+            def cleanup():
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            return response
+        return 'File not found', 404
+    
     # 注册蓝图到 Flask 应用
     app = Flask(__name__)
     app.register_blueprint(v1_bp)
+    
+    # 注册任务管理路由
+    register_task_routes(app)
+    
+    # 添加 CORS 支持
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key, X-Request-ID'
+        return response
     
     # HTTPS 强制跳转中间件
     @app.before_request
@@ -1340,6 +1884,7 @@ if FLASK_AVAILABLE:
         - FORCE_HTTPS=true  (默认) - 强制 HTTPS
         - FORCE_HTTPS=false - 允许 HTTP
         """
+        # 每次请求时动态读取环境变量
         force_https_env = os.environ.get('FORCE_HTTPS', 'true').lower() == 'true'
         
         if not force_https_env:

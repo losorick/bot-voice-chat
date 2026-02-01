@@ -6,7 +6,7 @@ import { useAuthStore } from '../stores/auth'
 import MessageBubble from '../components/MessageBubble.vue'
 import VoiceInput from '../components/VoiceInput.vue'
 import Live2DCharacter from '../components/Live2DCharacter.vue'
-import BackendService from '../services/openclaw'
+import OpenClawService from '../services/openclaw-chat'
 import TTSService from '../services/tts'
 
 const router = useRouter()
@@ -33,33 +33,37 @@ async function sendMessage(content = null) {
   const text = content || userInput.value.trim()
   if (!text) return
 
-  // 验证是否已配置 API Key
-  if (!authStore.isAuthenticated) {
-    alert('请先在设置页面配置 API Key')
-    router.push('/settings')
-    return
-  }
-
   // 添加用户消息
   chatStore.addMessage('user', text)
-  userInput.value = ''
+  if (!content) userInput.value = ''
   chatStore.isLoading = true
   isSpeechInterrupted.value = false
 
   try {
-    // 发送消息并获取回复
-    const reply = await BackendService.sendMessage(text)
+    // 通过 OpenClaw 会话获取回复（包含 TTS 音频）
+    const result = await OpenClawService.chat(text)
     
-    chatStore.addMessage('assistant', reply)
+    // 添加 AI 回复
+    chatStore.addMessage('assistant', result.reply)
     
-    // 自动播放语音
+    // 自动播放语音（使用总结后的内容）
     if (isAutoPlay.value) {
       // 触发 Live2D 说话动画
       if (showLive2D.value && live2dRef.value) {
         live2dRef.value.startSpeaking()
       }
       
-      TTSService.speak(reply)
+      if (result.ttsAudio) {
+        // 使用后端返回的 TTS 音频（总结后的内容）
+        console.log('Playing summarized TTS audio')
+        playTTSAudio(result.ttsAudio)
+      } else if (result.ttsSummary) {
+        // 使用总结文本调用 TTS
+        TTSService.speak(result.ttsSummary)
+      } else {
+        // 回退到原始回复
+        TTSService.speak(result.reply)
+      }
       
       // TTS 播放结束时停止动画
       TTSService.onEnd = () => {
@@ -83,6 +87,47 @@ async function sendMessage(content = null) {
   } finally {
     chatStore.isLoading = false
     scrollToBottom()
+  }
+}
+
+/**
+ * 播放 Base64 编码的 TTS 音频
+ */
+function playTTSAudio(base64Audio) {
+  try {
+    // 移除 data:audio/wav;base64, 前缀
+    const audioData = base64Audio.includes(',') 
+      ? base64Audio.split(',')[1] 
+      : base64Audio
+    
+    const binaryString = atob(audioData)
+    const len = binaryString.length
+    const bytes = new Uint8Array(len)
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i)
+    }
+    
+    const blob = new Blob([bytes], { type: 'audio/wav' })
+    const url = URL.createObjectURL(blob)
+    
+    const audio = new Audio(url)
+    audio.onended = () => {
+      if (live2dRef.value) {
+        live2dRef.value.stopSpeaking()
+      }
+      URL.revokeObjectURL(url)
+    }
+    audio.onerror = (error) => {
+      console.error('TTS audio play error:', error)
+      // 回退到原始 TTS
+      if (TTSService) {
+        TTSService.speak('播放音频失败')
+      }
+    }
+    
+    audio.play()
+  } catch (error) {
+    console.error('Failed to play TTS audio:', error)
   }
 }
 
@@ -111,10 +156,9 @@ function toggleAutoPlay() {
 onMounted(() => {
   scrollToBottom()
 
-  // 初始化 TTS
+  // 初始化 TTS (使用 DashScope cosyvoice-v3-flash)
   TTSService.init({
-    appKey: localStorage.getItem('aliyun_appkey') || '',
-    token: localStorage.getItem('aliyun_token') || '',
+    voice: 'longhuhu_v3',  // 音色: longhuhu_v3
     onEnd: () => console.log('TTS play ended'),
     onError: (error) => console.error('TTS error:', error),
     onSpeechInterrupt: () => {

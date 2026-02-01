@@ -5,7 +5,7 @@ import { useAudioAnalyzer } from '../composables/useAudioAnalyzer'
 const props = defineProps({
   modelUrl: {
     type: String,
-    default: '/models/live2d/koharu/koharu.model3.json'
+    default: '/models/live2d/haru/haru_greeter_t03.model3.json'
   },
   autoPlay: {
     type: Boolean,
@@ -18,6 +18,7 @@ const emit = defineEmits(['loaded', 'error'])
 const canvasRef = ref(null)
 const isLoading = ref(true)
 const model = ref(null)
+const isSpeaking = ref(false)
 
 // 音频分析器
 const { analyzeAudio, getMouthOpenness } = useAudioAnalyzer()
@@ -33,33 +34,58 @@ async function loadModel() {
   try {
     isLoading.value = true
     
-    // 动态加载 Live2D Cubism SDK
+    // 动态加载 Live2D Cubism Core (本地或 CDN)
     if (!window.Live2DCubismCore) {
-      await loadScript('https://cubism.live2d.com/sdk/web/cubismubsdk.js')
+      // 优先尝试本地加载
+      const localLoaded = await loadScriptSafe('/live2d.min.js')
+      if (!localLoaded) {
+        // 回退到 CDN
+        await loadScript('https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js')
+      }
     }
     
-    // 使用 Live2D Viewer 简化加载
-    await loadScript('https://cdn.jsdelivr.net/npm/live2d-viewer@1.1.1/dist/live2d-viewer.min.js')
+    // 动态加载 pixi-live2d-display (CDN)
+    if (!window.PIXI?.live2d) {
+      await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js')
+    }
     
-    // 创建模型
-    app = new window.Live2DViewer.App({
-      canvas: canvasRef.value,
-      model: props.modelUrl,
-      background: 'transparent',
-      debug: false
+    // 创建 PIXI 应用
+    const PIXI = window.PIXI
+    app = new PIXI.Application({
+      view: canvasRef.value,
+      width: 400,
+      height: 500,
+      backgroundAlpha: 0,
+      resolution: window.devicePixelRatio || 1,
+      autoDensity: true
     })
     
-    app.on('load', (model) => {
-      live2DModel = model
-      isLoading.value = false
-      emit('loaded', model)
-      startIdleAnimation()
-    })
+    // 加载 Live2D 模型
+    const { Live2DModel } = window.PIXI.live2d
     
-    app.on('error', (error) => {
-      emit('error', error)
-      isLoading.value = false
-    })
+    // 获取完整的模型 URL
+    const fullModelUrl = props.modelUrl.startsWith('/') 
+      ? props.modelUrl 
+      : `/${props.modelUrl}`
+    
+    live2DModel = await Live2DModel.from(fullModelUrl)
+    
+    // 设置模型位置和大小
+    live2DModel.position.set(200, 280)
+    live2DModel.scale.set(0.35, 0.35)
+    live2DModel.anchor.set(0.5, 0.5)
+    
+    app.stage.addChild(live2DModel)
+    
+    // 注册 Ticker 用于自动更新
+    Live2DModel.registerTicker(PIXI.Ticker)
+    
+    isLoading.value = false
+    model.value = live2DModel
+    emit('loaded', live2DModel)
+    
+    // 启动空闲动画
+    startIdleAnimation()
     
   } catch (error) {
     console.error('Failed to load Live2D model:', error)
@@ -69,7 +95,20 @@ async function loadModel() {
 }
 
 /**
- * 加载脚本
+ * 加载脚本（安全版本，返回是否成功）
+ */
+function loadScriptSafe(src) {
+  return new Promise((resolve) => {
+    const script = document.createElement('script')
+    script.src = src
+    script.onload = () => resolve(true)
+    script.onerror = () => resolve(false)
+    document.head.appendChild(script)
+  })
+}
+
+/**
+ * 加载脚本（失败抛错）
  */
 function loadScript(src) {
   return new Promise((resolve, reject) => {
@@ -82,28 +121,19 @@ function loadScript(src) {
 }
 
 /**
- * 播放说话动画
+ * 设置嘴巴开合度
  */
-function speak(audioUrl) {
+function setMouthOpen(value) {
   if (!live2DModel) return
   
-  const audio = new Audio(audioUrl)
+  // 映射音量到嘴巴开合 (0-1)
+  const mouthOpen = Math.min(1, Math.max(0, value))
   
-  audio.onplay = () => {
-    // 说话时：嘴巴开合 + 轻微晃动
-    startTalkingAnimation()
-    
-    // 分析音频音量控制嘴巴
-    analyzeAudio(audio, (mouthValue) => {
-      setMouthOpen(mouthValue)
-    })
+  try {
+    live2DModel.setParameterValue('PARAM_MOUTH_OPEN_Y', mouthOpen * 1.5)
+  } catch (e) {
+    // 如果模型不支持，忽略
   }
-  
-  audio.onended = () => {
-    stopTalkingAnimation()
-  }
-  
-  audio.play()
 }
 
 /**
@@ -113,6 +143,8 @@ let talkingInterval = null
 let idleInterval = null
 
 function startTalkingAnimation() {
+  if (!live2DModel) return
+  
   // 停止空闲动画
   stopIdleAnimation()
   
@@ -123,8 +155,12 @@ function startTalkingAnimation() {
     const breathe = Math.sin(Date.now() / 500) * 0.02
     const tilt = Math.sin(Date.now() / 300) * 0.03
     
-    live2DModel.setParameterValue('PARAM_BODY_ANGLE_X', tilt)
-    live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
+    try {
+      live2DModel.setParameterValue('PARAM_BODY_ANGLE_X', tilt)
+      live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
+    } catch (e) {
+      // 忽略
+    }
   }, 50)
 }
 
@@ -139,26 +175,10 @@ function stopTalkingAnimation() {
 }
 
 /**
- * 设置嘴巴开合度
- */
-function setMouthOpen(value) {
-  if (!live2DModel) return
-  
-  // 映射音量到嘴巴开合 (0-1)
-  const mouthOpen = Math.min(1, Math.max(0, value))
-  
-  // 使用 ParamMouthOpenY 控制嘴巴
-  live2DModel.setParameterValue('ParamMouthOpenY', mouthOpen * 0.8)
-  
-  // 同时调整下巴角度
-  live2DModel.setParameterValue('ParamJawOpen', mouthOpen * 0.5)
-}
-
-/**
  * 空闲动画（呼吸效果）
  */
 function startIdleAnimation() {
-  if (idleInterval) return
+  if (!live2DModel || idleInterval) return
   
   idleInterval = setInterval(() => {
     if (!live2DModel || isSpeaking.value) return
@@ -166,18 +186,24 @@ function startIdleAnimation() {
     // 轻微呼吸效果
     const breathe = Math.sin(Date.now() / 2000) * 0.01
     
-    live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
-    
-    // 眼睛微动
-    const eyeBlink = Math.sin(Date.now() / 3000) > 0.95
-    if (eyeBlink) {
-      live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 0)
-      live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 0)
-    } else {
-      live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 1)
-      live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 1)
+    try {
+      live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
+      
+      // 眼睛微动 - 随机眨眼
+      if (Math.random() < 0.002) {
+        live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 0)
+        live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 0)
+        setTimeout(() => {
+          if (live2DModel) {
+            live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 1)
+            live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 1)
+          }
+        }, 150)
+      }
+    } catch (e) {
+      // 忽略
     }
-  }, 100)
+  }, 50)
 }
 
 function stopIdleAnimation() {
@@ -188,21 +214,20 @@ function stopIdleAnimation() {
 }
 
 /**
- * 随机动作（增加生动感）
+ * 随机动作
  */
 function randomMotion() {
   if (!live2DModel || isSpeaking.value) return
   
-  const motions = [
-    { param: 'PARAM_ARM_L_L', value: 0.1, duration: 500 },
-    { param: 'PARAM_ARM_R_L', value: 0.1, duration: 500 },
-    { param: 'PARAM_ANGLE_X', value: 0.1, duration: 300 },
-    { param: 'PARAM_BODY_ANGLE_X', value: 0.05, duration: 400 }
-  ]
-  
-  const motion = motions[Math.floor(Math.random() * motions.length)]
-  
-  if (live2DModel) {
+  try {
+    const motions = [
+      { param: 'PARAM_ANGLE_X', value: 0.05 },
+      { param: 'PARAM_BODY_ANGLE_X', value: 0.03 },
+      { param: 'PARAM_ARM_L_L', value: 0.05 },
+      { param: 'PARAM_ARM_R_L', value: 0.05 }
+    ]
+    
+    const motion = motions[Math.floor(Math.random() * motions.length)]
     const currentValue = live2DModel.getParameterValue(motion.param) || 0
     live2DModel.setParameterValue(motion.param, currentValue + motion.value)
     
@@ -210,12 +235,11 @@ function randomMotion() {
       if (live2DModel) {
         live2DModel.setParameterValue(motion.param, currentValue)
       }
-    }, motion.duration)
+    }, 300)
+  } catch (e) {
+    // 忽略
   }
 }
-
-// 状态
-const isSpeaking = ref(false)
 
 /**
  * 开始说话（外部调用）
@@ -234,12 +258,37 @@ function stopSpeaking() {
   setMouthOpen(0)
 }
 
+/**
+ * 播放说话动画
+ */
+function speak(audioUrl) {
+  if (!live2DModel) return
+  
+  const audio = new Audio(audioUrl)
+  
+  audio.onplay = () => {
+    startTalkingAnimation()
+    
+    // 分析音频音量控制嘴巴
+    analyzeAudio(audio, (mouthValue) => {
+      setMouthOpen(mouthValue)
+    })
+  }
+  
+  audio.onended = () => {
+    stopTalkingAnimation()
+  }
+  
+  audio.play()
+}
+
 // 暴露方法给父组件
 defineExpose({
   speak,
   startSpeaking,
   stopSpeaking,
-  loadModel
+  loadModel,
+  get speaking() { return isSpeaking.value }
 })
 
 onMounted(() => {
@@ -256,7 +305,7 @@ onUnmounted(() => {
   stopIdleAnimation()
   
   if (app) {
-    app.dispose()
+    app.destroy(true)
   }
 })
 </script>

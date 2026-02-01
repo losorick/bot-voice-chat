@@ -2,7 +2,8 @@ import { errorHandler, handleTTSError, handleNetworkError } from '../composables
 import { useSpeechInterrupt } from '../composables/useSpeechInterrupt'
 
 /**
- * 阿里云 TTS (语音合成) 服务
+ * DashScope TTS (语音合成) 服务
+ * 使用阿里云 DashScope cosyvoice-v3-flash 模型
  */
 
 class TTSService {
@@ -13,24 +14,22 @@ class TTSService {
     this.onSpeechInterrupt = null
     this.speechInterrupt = null
     this.isPlaying = false
+    this.baseUrl = 'http://localhost:5002'
   }
 
   /**
    * 初始化 TTS 服务
    * @param {Object} config 配置
-   * @param {string} config.appKey 阿里云 App Key
-   * @param {string} config.token 访问令牌
+   * @param {string} config.voice 音色 (默认: longanyang)
    * @param {Function} config.onPlayEnd 播放结束回调
    * @param {Function} config.onError 错误回调
    * @param {Function} config.onSpeechInterrupt 语音打断回调
    */
   init(config) {
-    this.appKey = config.appKey
-    this.token = config.token
+    this.voice = config.voice || 'longanyang'
     this.onEnd = config.onEnd
     this.onError = config.onError
     this.onSpeechInterrupt = config.onSpeechInterrupt
-    this.voice = config.voice || 'siqi' // 默认音色
 
     // 初始化语音打断检测
     this.speechInterrupt = useSpeechInterrupt({
@@ -44,11 +43,7 @@ class TTSService {
    */
   handleSpeechInterrupt() {
     console.log('Speech interrupt detected!')
-    
-    // 停止 TTS 播放
     this.stop()
-    
-    // 触发打断回调
     if (this.onSpeechInterrupt) {
       this.onSpeechInterrupt()
     }
@@ -83,29 +78,22 @@ class TTSService {
       this.isPlaying = true
       this.enableSpeechInterrupt()
 
-      // 阿里云 TTS API 调用
-      const response = await fetch(
-        `https://nls-gateway.cn-shanghai.aliyuncs.com/rest/v1/tts?appkey=${this.appKey}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.token}`
-          },
-          body: JSON.stringify({
-            text,
-            format: 'mp3',
-            sample_rate: 16000,
-            voice: this.voice,
-            volume: 50,
-            speech_rate: 0,
-            pitch_rate: 0
-          })
-        }
-      )
+      // 调用后端 DashScope TTS API
+      const response = await fetch(`${this.baseUrl}/api/v1/tts/synthesize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          text: text,
+          voice: this.voice,
+          format: 'pcm_22050hz_mono_16bit'
+        })
+      })
 
       if (!response.ok) {
-        const error = new Error('TTS request failed')
+        const errorData = await response.json().catch(() => ({}))
+        const error = new Error(errorData.error || 'TTS request failed')
         error.code = response.status
         throw error
       }
@@ -113,14 +101,26 @@ class TTSService {
       const blob = await response.blob()
       const url = URL.createObjectURL(blob)
 
-      this.audio = new Audio(url)
-      this.audio.onended = () => {
+      const audio = new Audio(url)
+      this.audio = audio
+      
+      audio.oncanplaythrough = () => {
+        console.log('TTS: Audio can play through, starting playback')
+        audio.play().catch(err => {
+          console.error('TTS play() failed:', err)
+          this.isPlaying = false
+          this.disableSpeechInterrupt()
+        })
+      }
+      
+      audio.onended = () => {
         this.isPlaying = false
         this.disableSpeechInterrupt()
         this.onEnd?.()
         URL.revokeObjectURL(url)
       }
-      this.audio.onerror = (error) => {
+      audio.onerror = (error) => {
+        console.error('TTS audio error:', error)
         this.isPlaying = false
         this.disableSpeechInterrupt()
         const handledError = handleNetworkError(error)
@@ -128,7 +128,8 @@ class TTSService {
         errorHandler.showError(handledError)
       }
 
-      this.audio.play()
+      // 预加载音频
+      audio.load()
 
     } catch (error) {
       this.isPlaying = false

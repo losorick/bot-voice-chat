@@ -8,6 +8,8 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const apiKey = ref('')
+const aliyunAppKey = ref('')
+const aliyunToken = ref('')
 const verificationStatus = ref('')
 const isVerifying = ref(false)
 
@@ -26,6 +28,15 @@ async function saveSettings() {
     if (result.success) {
       authStore.setApiKey(apiKey.value.trim())
       authStore.setVerified(Date.now().toString())
+      
+      // 保存阿里云配置
+      if (aliyunAppKey.value.trim()) {
+        localStorage.setItem('aliyun_appkey', aliyunAppKey.value.trim())
+      }
+      if (aliyunToken.value.trim()) {
+        localStorage.setItem('aliyun_token', aliyunToken.value.trim())
+      }
+      
       verificationStatus.value = '✅ 验证成功！'
       setTimeout(() => {
         alert('设置已保存！')
@@ -47,6 +58,8 @@ function goBack() {
 
 onMounted(() => {
   apiKey.value = authStore.apiKey || ''
+  aliyunAppKey.value = localStorage.getItem('aliyun_appkey') || ''
+  aliyunToken.value = localStorage.getItem('aliyun_token') || ''
 })
 </script>
 
@@ -76,22 +89,54 @@ onMounted(() => {
         </div>
       </section>
 
+      <section class="setting-section">
+        <h2>🎤 阿里云语音配置</h2>
+        <div class="form-group">
+          <label>App Key</label>
+          <input 
+            v-model="aliyunAppKey"
+            type="password"
+            placeholder="阿里云语音识别 App Key"
+          />
+          <span class="hint">阿里云语音服务 App Key（用于语音识别和合成）</span>
+        </div>
+        <div class="form-group">
+          <label>Token</label>
+          <input 
+            v-model="aliyunToken"
+            type="password"
+            placeholder="阿里云语音服务 Token"
+          />
+          <span class="hint">阿里云语音服务 Token（从阿里云控制台获取）</span>
+        </div>
+      </section>
+
       <div class="actions">
         <button 
           class="save-btn" 
           @click="saveSettings"
           :disabled="isVerifying"
         >
-          {{ isVerifying ? '验证中...' : '保存并验证' }}
+          {{ isVerifying ? '验证中...' : '保存设置' }}
         </button>
       </div>
 
       <div class="help-section">
-        <h3>📖 如何获取 API Key？</h3>
+        <h3>📖 API Key 获取方法</h3>
         <ol>
           <li>启动后端服务: <code>cd backend && python auth_api.py</code></li>
           <li>创建 API Key: <code>flask create-key</code></li>
-          <li>复制生成的 Key 并在 above 输入</li>
+          <li>复制生成的 Key 并在上方输入</li>
+        </ol>
+      </div>
+
+      <div class="help-section">
+        <h3>🎤 阿里云语音服务配置</h3>
+        <ol>
+          <li>访问 <a href="https://nls.console.aliyun.com/" target="_blank">阿里云智能语音服务</a></li>
+          <li>创建语音识别（ASR）和语音合成（TTS）服务</li>
+          <li>获取 App Key 和 Token</li>
+          <li>在上方输入配置</li>
         </ol>
       </div>
     </main>

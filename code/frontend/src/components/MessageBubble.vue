@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { marked } from 'marked'
 
 const props = defineProps({
   role: {
@@ -26,6 +27,17 @@ const formattedTime = computed(() => {
     minute: '2-digit'
   })
 })
+
+// 渲染 Markdown
+const renderedContent = computed(() => {
+  const content = props.content || ''
+  // 配置 marked 简化输出
+  marked.setOptions({
+    breaks: true,  // 允许换行
+    gfm: true      // GitHub 风格 Markdown
+  })
+  return marked.parse(content)
+})
 </script>
 
 <template>
@@ -34,7 +46,9 @@ const formattedTime = computed(() => {
       {{ isUser ? '👤' : '🤖' }}
     </div>
     <div class="bubble">
-      <div class="content">{{ content }}</div>
+      <!-- 助手消息使用 Markdown 渲染 -->
+      <div v-if="isUser" class="content">{{ content }}</div>
+      <div v-else class="content markdown" v-html="renderedContent"></div>
       <div v-if="timestamp" class="time">{{ formattedTime }}</div>
     </div>
   </div>
@@ -94,6 +108,66 @@ const formattedTime = computed(() => {
 .content {
   line-height: 1.5;
   word-wrap: break-word;
+}
+
+/* Markdown 样式 */
+.markdown {
+  font-size: 14px;
+}
+
+.markdown :deep(p) {
+  margin: 0 0 8px 0;
+}
+
+.markdown :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown :deep(code) {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'SF Mono', Monaco, monospace;
+}
+
+.message-user .markdown :deep(code) {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.markdown :deep(pre) {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.message-user .markdown :deep(pre) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.markdown :deep(ul),
+.markdown :deep(ol) {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.markdown :deep(strong) {
+  font-weight: 600;
+}
+
+.markdown :deep(em) {
+  font-style: italic;
+}
+
+.markdown :deep(a) {
+  color: #667eea;
+  text-decoration: none;
+}
+
+.markdown :deep(a:hover) {
+  text-decoration: underline;
 }
 
 .time {
