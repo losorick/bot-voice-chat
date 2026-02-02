@@ -101,6 +101,37 @@ class SQLiteStorage:
             ''')
             
             conn.commit()
+            
+            # 创建唤醒事件表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS wake_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    event_time TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL CHECK(trigger_type IN ('wake_word', 'manual')),
+                    success BOOLEAN DEFAULT 1,
+                    audio_duration FLOAT,
+                    metadata TEXT
+                )
+            ''')
+            
+            # 创建唤醒事件索引
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_wake_events_session_id 
+                ON wake_events(session_id)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_wake_events_event_time 
+                ON wake_events(event_time)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_wake_events_trigger_type 
+                ON wake_events(trigger_type)
+            ''')
+            
+            conn.commit()
             conn.close()
     
     def _get_connection(self) -> sqlite3.Connection:
@@ -749,3 +780,383 @@ def reset_storage():
     if _storage:
         _storage.close()
     _storage = None
+
+
+# ============================================================================
+# 唤醒事件存储
+# ============================================================================
+
+class WakeEventStorage:
+    """
+    唤醒事件持久化存储
+    
+    支持：
+    - 唤醒事件记录和查询
+    - 统计分析和报告
+    - 事件清理
+    """
+    
+    def __init__(self, db_path: str = None):
+        """
+        初始化存储管理器
+        
+        Args:
+            db_path: 数据库文件路径（默认使用主数据库）
+        """
+        if db_path is None:
+            # 使用主数据库
+            self.db_path = os.path.join(os.getcwd(), SQLiteStorage.DB_FILENAME)
+        else:
+            self.db_path = db_path
+        
+        self._lock = threading.RLock()
+    
+    def _get_connection(self) -> sqlite3.Connection:
+        """获取数据库连接"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON')
+        return conn
+    
+    # ========== 唤醒事件 CRUD ==========
+    
+    def record_wake_event(self, session_id: str, trigger_type: str,
+                          success: bool = True, audio_duration: float = None,
+                          metadata: Dict[str, Any] = None) -> Optional[int]:
+        """
+        记录唤醒事件
+        
+        Args:
+            session_id: 会话 ID
+            trigger_type: 触发类型 ('wake_word' or 'manual')
+            success: 是否成功
+            audio_duration: 音频时长（秒）
+            metadata: 其他元数据
+            
+        Returns:
+            事件 ID，失败返回 None
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                now = datetime.now().isoformat()
+                metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+                
+                cursor.execute('''
+                    INSERT INTO wake_events 
+                    (session_id, event_time, trigger_type, success, audio_duration, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    session_id,
+                    now,
+                    trigger_type,
+                    1 if success else 0,
+                    audio_duration,
+                    metadata_json
+                ))
+                
+                event_id = cursor.lastrowid
+                conn.commit()
+                conn.close()
+                
+                return event_id
+            except Exception as e:
+                print(f"[WakeEventStorage] 记录唤醒事件失败: {e}")
+                return None
+    
+    def get_wake_event(self, event_id: int) -> Optional[Dict[str, Any]]:
+        """
+        获取唤醒事件详情
+        
+        Args:
+            event_id: 事件 ID
+            
+        Returns:
+            事件字典，未找到返回 None
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('SELECT * FROM wake_events WHERE id = ?', (event_id,))
+                row = cursor.fetchone()
+                conn.close()
+                
+                if row:
+                    return self._row_to_wake_event(row)
+                return None
+            except Exception as e:
+                print(f"[WakeEventStorage] 获取唤醒事件失败: {e}")
+                return None
+    
+    def get_wake_events_by_session(self, session_id: str, 
+                                   limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        获取会话的唤醒事件列表
+        
+        Args:
+            session_id: 会话 ID
+            limit: 返回数量限制
+            
+        Returns:
+            事件列表
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    SELECT * FROM wake_events 
+                    WHERE session_id = ?
+                    ORDER BY event_time DESC
+                    LIMIT ?
+                ''', (session_id, limit))
+                
+                rows = cursor.fetchall()
+                conn.close()
+                
+                return [self._row_to_wake_event(row) for row in rows]
+            except Exception as e:
+                print(f"[WakeEventStorage] 获取会话唤醒事件失败: {e}")
+                return []
+    
+    def get_recent_wake_events(self, limit: int = 100,
+                               offset: int = 0) -> List[Dict[str, Any]]:
+        """
+        获取最近的唤醒事件
+        
+        Args:
+            limit: 返回数量限制
+            offset: 偏移量
+            
+        Returns:
+            事件列表
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('''
+                    SELECT * FROM wake_events 
+                    ORDER BY event_time DESC
+                    LIMIT ? OFFSET ?
+                ''', (limit, offset))
+                
+                rows = cursor.fetchall()
+                conn.close()
+                
+                return [self._row_to_wake_event(row) for row in rows]
+            except Exception as e:
+                print(f"[WakeEventStorage] 获取最近唤醒事件失败: {e}")
+                return []
+    
+    # ========== 唤醒事件统计 ==========
+    
+    def get_wake_stats(self, days: int = 7) -> Dict[str, Any]:
+        """
+        获取唤醒统计信息
+        
+        Args:
+            days: 统计最近多少天的数据
+            
+        Returns:
+            统计信息字典
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                # 计算日期阈值
+                threshold = datetime.now().timestamp() - (days * 24 * 3600)
+                threshold_date = datetime.fromtimestamp(threshold).strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 总唤醒次数
+                cursor.execute('SELECT COUNT(*) FROM wake_events WHERE event_time >= ?', (threshold_date,))
+                total_count = cursor.fetchone()[0]
+                
+                # 成功次数
+                cursor.execute('SELECT COUNT(*) FROM wake_events WHERE event_time >= ? AND success = 1', (threshold_date,))
+                success_count = cursor.fetchone()[0]
+                
+                # 按触发类型统计
+                cursor.execute('''
+                    SELECT trigger_type, COUNT(*) as cnt
+                    FROM wake_events 
+                    WHERE event_time >= ?
+                    GROUP BY trigger_type
+                ''', (threshold_date,))
+                type_stats = {row['trigger_type']: row['cnt'] for row in cursor.fetchall()}
+                
+                # 今日唤醒次数
+                today = datetime.now().strftime('%Y-%m-%d')
+                cursor.execute('SELECT COUNT(*) FROM wake_events WHERE date(event_time) = ?', (today,))
+                today_count = cursor.fetchone()[0]
+                
+                # 今日成功次数
+                cursor.execute('SELECT COUNT(*) FROM wake_events WHERE date(event_time) = ? AND success = 1', (today,))
+                today_success = cursor.fetchone()[0]
+                
+                # 平均音频时长
+                cursor.execute('''
+                    SELECT AVG(audio_duration) FROM wake_events 
+                    WHERE event_time >= ? AND audio_duration IS NOT NULL
+                ''', (threshold_date,))
+                avg_duration = cursor.fetchone()[0] or 0
+                
+                # 按天统计（最近7天）
+                cursor.execute('''
+                    SELECT date(event_time) as date, COUNT(*) as count, AVG(success) as success_rate
+                    FROM wake_events 
+                    WHERE event_time >= ?
+                    GROUP BY date(event_time)
+                    ORDER BY date DESC
+                    LIMIT ?
+                ''', (threshold_date, days))
+                daily_stats = [
+                    {
+                        'date': row['date'],
+                        'count': row['count'],
+                        'success_rate': round(row['success_rate'] * 100, 2)
+                    }
+                    for row in cursor.fetchall()
+                ]
+                
+                conn.close()
+                
+                return {
+                    'period_days': days,
+                    'total_events': total_count,
+                    'successful_events': success_count,
+                    'success_rate': round(success_count / total_count * 100, 2) if total_count > 0 else 0,
+                    'today_events': today_count,
+                    'today_success': today_success,
+                    'today_success_rate': round(today_success / today_count * 100, 2) if today_count > 0 else 0,
+                    'by_trigger_type': type_stats,
+                    'avg_audio_duration': round(avg_duration, 2),
+                    'daily_stats': daily_stats,
+                    'database_size_bytes': os.path.getsize(self.db_path)
+                }
+            except Exception as e:
+                print(f"[WakeEventStorage] 获取统计失败: {e}")
+                return {}
+    
+    # ========== 唤醒事件清理 ==========
+    
+    def cleanup_old_wake_events(self, days: int = 30) -> int:
+        """
+        清理旧唤醒事件
+        
+        Args:
+            days: 保留最近多少天的记录
+            
+        Returns:
+            删除的记录数量
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                # 计算日期阈值
+                threshold = datetime.now().timestamp() - (days * 24 * 3600)
+                threshold_date = datetime.fromtimestamp(threshold).strftime('%Y-%m-%d %H:%M:%S')
+                
+                cursor.execute('DELETE FROM wake_events WHERE event_time < ?', (threshold_date,))
+                deleted_count = cursor.rowcount
+                
+                conn.commit()
+                conn.close()
+                
+                return deleted_count
+            except Exception as e:
+                print(f"[WakeEventStorage] 清理旧唤醒事件失败: {e}")
+                return 0
+    
+    def clear_all_wake_events(self) -> int:
+        """
+        清空所有唤醒事件
+        
+        Returns:
+            删除的记录数量
+        """
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('DELETE FROM wake_events')
+                deleted_count = cursor.rowcount
+                
+                conn.commit()
+                conn.close()
+                
+                return deleted_count
+            except Exception as e:
+                print(f"[WakeEventStorage] 清空唤醒事件失败: {e}")
+                return 0
+    
+    # ========== 辅助方法 ==========
+    
+    def _row_to_wake_event(self, row: sqlite3.Row) -> Dict[str, Any]:
+        """将数据库行转换为唤醒事件字典"""
+        try:
+            metadata = json.loads(row['metadata']) if row['metadata'] else {}
+        except json.JSONDecodeError:
+            metadata = {}
+        
+        return {
+            'id': row['id'],
+            'session_id': row['session_id'],
+            'event_time': row['event_time'],
+            'trigger_type': row['trigger_type'],
+            'success': bool(row['success']),
+            'audio_duration': row['audio_duration'],
+            'metadata': metadata
+        }
+    
+    def get_unique_session_ids(self) -> List[str]:
+        """获取所有唯一会话 ID"""
+        with self._lock:
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                cursor.execute('SELECT DISTINCT session_id FROM wake_events ORDER BY event_time DESC')
+                session_ids = [row[0] for row in cursor.fetchall()]
+                
+                conn.close()
+                return session_ids
+            except Exception as e:
+                print(f"[WakeEventStorage] 获取会话 ID 列表失败: {e}")
+                return []
+    
+    def close(self):
+        """关闭数据库连接"""
+        pass
+
+
+# 全局唤醒事件存储实例
+_wake_storage: Optional[WakeEventStorage] = None
+_wake_storage_lock = threading.Lock()
+
+
+def get_wake_storage(db_path: str = None) -> WakeEventStorage:
+    """获取唤醒事件存储单例"""
+    global _wake_storage
+    if _wake_storage is None:
+        with _wake_storage_lock:
+            if _wake_storage is None:
+                _wake_storage = WakeEventStorage(db_path=db_path)
+    return _wake_storage
+
+
+def reset_wake_storage():
+    """重置唤醒事件存储（用于测试）"""
+    global _wake_storage
+    _wake_storage = None

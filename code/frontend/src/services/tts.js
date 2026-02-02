@@ -14,7 +14,7 @@ class TTSService {
     this.onSpeechInterrupt = null
     this.speechInterrupt = null
     this.isPlaying = false
-    this.baseUrl = 'http://localhost:5005'
+    this.baseUrl = 'http://localhost:5002'
   }
 
   /**

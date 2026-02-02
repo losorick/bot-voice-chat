@@ -257,6 +257,60 @@ onMounted(() => {
     }
   })
 })
+
+/**
+ * 处理唤醒词检测响应状态
+ * @param {string} state - 状态: 'waking' | 'recording' | 'processing' | 'idle'
+ */
+function handleWakeResponse(state) {
+  console.log('Wake response state:', state)
+  
+  if (state === 'waking') {
+    // 唤醒中 - 触发 Live2D 唤醒动画
+    if (showLive2D.value && live2dRef.value) {
+      live2dRef.value.triggerWakeResponse()
+    }
+    
+    // 播放唤醒确认音效（可选）
+    playWakeSound()
+  } else if (state === 'recording') {
+    // 录音中 - Live2D 进入倾听状态
+    if (showLive2D.value && live2dRef.value) {
+      // 可以让模型保持轻微的动画
+    }
+  } else if (state === 'processing') {
+    // 处理中 - 停止 Live2D 录音状态
+  } else if (state === 'idle') {
+    // 恢复空闲状态
+  }
+}
+
+/**
+ * 播放唤醒确认音效
+ */
+function playWakeSound() {
+  try {
+    // 创建简单的提示音
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)()
+    const oscillator = audioContext.createOscillator()
+    const gainNode = audioContext.createGain()
+    
+    oscillator.connect(gainNode)
+    gainNode.connect(audioContext.destination)
+    
+    // 设置音调 - 两个短音表示确认
+    oscillator.frequency.setValueAtTime(800, audioContext.currentTime)
+    oscillator.frequency.setValueAtTime(1000, audioContext.currentTime + 0.1)
+    
+    gainNode.gain.setValueAtTime(0.1, audioContext.currentTime)
+    gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.2)
+    
+    oscillator.start(audioContext.currentTime)
+    oscillator.stop(audioContext.currentTime + 0.2)
+  } catch (error) {
+    console.warn('Failed to play wake sound:', error)
+  }
+}
 </script>
 
 <template>
@@ -338,7 +392,10 @@ onMounted(() => {
         </button>
       </div>
       
-      <VoiceInput />
+      <!-- 语音输入组件，监听唤醒响应事件 -->
+      <VoiceInput 
+        @wake-response="handleWakeResponse"
+      />
     </footer>
   </div>
 </template>

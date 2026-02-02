@@ -19,15 +19,323 @@ import json
 import re
 import uuid
 import logging
-from datetime import datetime
+import threading
+import time
+import signal
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
 from typing import Optional, Dict, Any, List
 from functools import wraps
 from html import escape as html_escape
 
-# 加载 .env 文件
+# #region agent log
+DEBUG_LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), '.cursor', 'debug.log')
+def _debug_log(location, message, data=None, hypothesis_id=None):
+    try:
+        payload = {'location': location, 'message': message, 'timestamp': int(time.time() * 1000), 'sessionId': 'debug-session'}
+        if data: payload['data'] = data
+        if hypothesis_id: payload['hypothesisId'] = hypothesis_id
+        with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+# #endregion
+
+# ============================================================================
+# 限流模块
+# ============================================================================
+
+class RateLimiter:
+    """基于 IP 的请求限流器"""
+    
+    def __init__(self, max_requests: int = 60, per_seconds: int = 60):
+        """
+        初始化限流器
+        
+        Args:
+            max_requests: 最大请求数
+            per_seconds: 时间窗口（秒）
+        """
+        self.max_requests = max_requests
+        self.per_seconds = per_seconds
+        self.requests: Dict[str, list] = defaultdict(list)
+        self._lock = threading.Lock()
+    
+    def _get_client_ip(self) -> str:
+        """获取客户端 IP 地址"""
+        # 优先检查 X-Forwarded-For 头（反向代理场景）
+        forwarded = request.headers.get('X-Forwarded-For', '')
+        if forwarded:
+            return forwarded.split(',')[0].strip()
+        # 检查 X-Real-IP 头
+        real_ip = request.headers.get('X-Real-IP', '')
+        if real_ip:
+            return real_ip.strip()
+        # 直接获取远程地址
+        return request.remote_addr or 'unknown'
+    
+    def _cleanup_old_requests(self, client_ip: str, current_time: float):
+        """清理过期的请求记录"""
+        cutoff = current_time - self.per_seconds
+        self.requests[client_ip] = [
+            req_time for req_time in self.requests[client_ip] 
+            if req_time > cutoff
+        ]
+    
+    def is_allowed(self) -> tuple[bool, Dict[str, Any]]:
+        """
+        检查是否允许请求
+        
+        Returns:
+            (是否允许, 限流信息)
+        """
+        with self._lock:
+            client_ip = self._get_client_ip()
+            current_time = time.time()
+            
+            # 清理过期记录
+            self._cleanup_old_requests(client_ip, current_time)
+            
+            # 检查请求数量
+            request_count = len(self.requests[client_ip])
+            
+            if request_count >= self.max_requests:
+                # 计算重置时间
+                oldest_request = min(self.requests[client_ip])
+                reset_time = oldest_request + self.per_seconds
+                retry_after = int(reset_time - current_time) + 1
+                
+                return False, {
+                    'limit': self.max_requests,
+                    'remaining': 0,
+                    'reset_after': retry_after,
+                    'retry_after': retry_after
+                }
+            
+            # 记录新请求
+            self.requests[client_ip].append(current_time)
+            
+            # 计算剩余请求
+            remaining = self.max_requests - request_count - 1
+            
+            return True, {
+                'limit': self.max_requests,
+                'remaining': max(0, remaining),
+                'reset_after': self.per_seconds,
+                'retry_after': 0
+            }
+    
+    def get_request_count(self, client_ip: str = None) -> int:
+        """获取指定 IP 的当前请求数"""
+        if client_ip is None:
+            client_ip = self._get_client_ip()
+        
+        with self._lock:
+            current_time = time.time()
+            self._cleanup_old_requests(client_ip, current_time)
+            return len(self.requests.get(client_ip, []))
+
+
+class ConcurrentLimiter:
+    """并发请求限制器"""
+    
+    def __init__(self, max_concurrent: int = 10):
+        """
+        初始化并发限制器
+        
+        Args:
+            max_concurrent: 最大并发请求数
+        """
+        self.max_concurrent = max_concurrent
+        self.semaphore = threading.Semaphore(max_concurrent)
+        self.current_requests = 0
+        self._lock = threading.Lock()
+    
+    def acquire(self, timeout: float = 5.0) -> bool:
+        """
+        获取执行许可
+        
+        Args:
+            timeout: 等待超时时间（秒）
+            
+        Returns:
+            是否获取成功
+        """
+        acquired = self.semaphore.acquire(timeout=timeout)
+        if acquired:
+            with self._lock:
+                self.current_requests += 1
+        return acquired
+    
+    def release(self):
+        """释放执行许可"""
+        with self._lock:
+            self.current_requests = max(0, self.current_requests - 1)
+        self.semaphore.release()
+    
+    def get_current_count(self) -> int:
+        """获取当前并发请求数"""
+        with self._lock:
+            return self.current_requests
+
+
+# 全局限流器和并发限制器实例
+rate_limiter = RateLimiter(max_requests=60, per_seconds=60)
+concurrent_limiter = ConcurrentLimiter(max_concurrent=10)
+
+
+def rate_limit_decorator(max_requests: int = 60, per_seconds: int = 60):
+    """
+    限流装饰器工厂
+    
+    Args:
+        max_requests: 最大请求数
+        per_seconds: 时间窗口（秒）
+        
+    Usage:
+        @rate_limit_decorator(max_requests=30, per_seconds=60)
+        @app.route('/api/xxx')
+        def xxx():
+            ...
+    """
+    # 创建专用的限流器
+    limiter = RateLimiter(max_requests, per_seconds)
+    
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            allowed, limit_info = limiter.is_allowed()
+            
+            if not allowed:
+                response = jsonify({
+                    'success': False,
+                    'error': '请求过于频繁，请稍后再试',
+                    'retry_after': limit_info['retry_after'],
+                    'request_id': getattr(g, 'request_id', '')
+                })
+                response.status_code = 429
+                response.headers['Retry-After'] = str(limit_info['retry_after'])
+                response.headers['X-RateLimit-Limit'] = str(limit_info['limit'])
+                response.headers['X-RateLimit-Remaining'] = '0'
+                response.headers['X-RateLimit-Reset-After'] = str(limit_info['reset_after'])
+                return response
+            
+            # 添加限流头信息
+            response = f(*args, **kwargs)
+            if hasattr(response, 'headers'):
+                response.headers['X-RateLimit-Limit'] = str(limit_info['limit'])
+                response.headers['X-RateLimit-Remaining'] = str(limit_info['remaining'])
+                response.headers['X-RateLimit-Reset-After'] = str(limit_info['reset_after'])
+            return response
+        return decorated_function
+    return decorator
+
+
+# ============================================================================
+# 超时控制模块
+# ============================================================================
+
+class RequestTimeout(Exception):
+    """请求超时异常"""
+    pass
+
+
+def set_timeout(seconds: int):
+    """
+    设置请求超时（使用信号机制，仅在 Unix 系统有效）
+    
+    Args:
+        seconds: 超时时间（秒）
+        
+    Usage:
+        @set_timeout(30)
+        def long_running_function():
+            ...
+    """
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            def timeout_handler(signum, frame):
+                raise RequestTimeout(f"请求超时（{seconds}秒）")
+            
+            # 设置信号处理器
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(seconds)
+            
+            try:
+                result = f(*args, **kwargs)
+            except RequestTimeout as e:
+                raise e
+            finally:
+                # 恢复原有处理器
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+            
+            return result
+        return decorated_function
+    return decorator
+
+
+def async_timeout(seconds: int):
+    """
+    异步超时装饰器（使用线程）
+    注意：需在目标线程中复制 Flask 请求上下文，否则 request/g 不可用
+    """
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            from flask import copy_current_request_context, g
+            request_id = getattr(g, 'request_id', None) or get_request_id()
+            result = [None]
+            exception = [None]
+
+            def target():
+                try:
+                    g.request_id = request_id  # 复制 g 到子线程上下文
+                    result[0] = f(*args, **kwargs)
+                except Exception as e:
+                    exception[0] = e
+
+            target_with_ctx = copy_current_request_context(target)
+            thread = threading.Thread(target=target_with_ctx)
+            thread.daemon = True
+            thread.start()
+            thread.join(seconds)
+            
+            if thread.is_alive():
+                # 线程仍在运行，表示超时
+                raise RequestTimeout(f"请求超时（{seconds}秒）")
+            
+            if exception[0]:
+                raise exception[0]
+            
+            return result[0]
+        return decorated_function
+    return decorator
+
+
+# 全局超时配置
+DEFAULT_TIMEOUT = 30  # 默认全局超时（秒）
+LONG_TIMEOUT = 120    # 长时间操作超时（秒）
+
+
+# ============================================================================
+# 尝试导入 psutil 用于资源监控
+# ============================================================================
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("⚠️ psutil 未安装，资源监控功能将不可用")
+    print("   安装命令: pip install psutil")
+
+# 加载 .env 文件（使用脚本所在目录，不依赖 cwd）
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    load_dotenv(dotenv_path=_env_path)
 except ImportError:
     pass
 
@@ -69,6 +377,112 @@ def setup_logging():
     logger.addHandler(handler)
     
     return logger
+
+
+# ============================================================================
+# 资源监控模块
+# ============================================================================
+
+class ResourceMonitor:
+    """资源监控器"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._start_time = datetime.now()
+        self._request_count = 0
+        self._lock = threading.Lock()
+        
+        # 初始化进程信息
+        if PSUTIL_AVAILABLE:
+            try:
+                self._process = psutil.Process()
+            except Exception:
+                self._process = None
+        else:
+            self._process = None
+    
+    def increment_request_count(self):
+        """增加请求计数"""
+        with self._lock:
+            self._request_count += 1
+    
+    def get_memory_usage(self) -> Dict[str, float]:
+        """获取内存使用情况"""
+        if not PSUTIL_AVAILABLE or self._process is None:
+            return {'rss_mb': 0, 'vms_mb': 0, 'percent': 0}
+        
+        try:
+            mem_info = self._process.memory_info()
+            mem_percent = self._process.memory_percent()
+            return {
+                'rss_mb': mem_info.rss / (1024 * 1024),  # 实际物理内存
+                'vms_mb': mem_info.vms / (1024 * 1024),  # 虚拟内存
+                'percent': mem_percent  # 内存使用百分比
+            }
+        except Exception:
+            return {'rss_mb': 0, 'vms_mb': 0, 'percent': 0}
+    
+    def get_cpu_usage(self) -> Dict[str, Any]:
+        """获取 CPU 使用情况"""
+        if not PSUTIL_AVAILABLE or self._process is None:
+            return {'percent': 0, 'user_seconds': 0, 'system_seconds': 0}
+        
+        try:
+            cpu_percent = self._process.cpu_percent(interval=0.1)
+            cpu_times = self._process.cpu_times()
+            return {
+                'percent': cpu_percent,
+                'user_seconds': cpu_times.user,
+                'system_seconds': cpu_times.system
+            }
+        except Exception:
+            return {'percent': 0, 'user_seconds': 0, 'system_seconds': 0}
+    
+    def get_active_tasks_count(self) -> int:
+        """获取活跃任务数量"""
+        try:
+            # 从上下文管理器获取活跃会话数
+            context_manager = get_context_manager()
+            stats = context_manager.get_statistics()
+            return stats.get('active_sessions', 0)
+        except Exception:
+            return 0
+    
+    def get_request_count(self) -> int:
+        """获取请求计数"""
+        with self._lock:
+            return self._request_count
+    
+    def get_uptime_seconds(self) -> float:
+        """获取服务运行时间（秒）"""
+        return (datetime.now() - self._start_time).total_seconds()
+    
+    def get_full_status(self) -> Dict[str, Any]:
+        """获取完整状态信息"""
+        return {
+            'memory': self.get_memory_usage(),
+            'cpu': self.get_cpu_usage(),
+            'active_tasks': self.get_active_tasks_count(),
+            'request_count': self.get_request_count(),
+            'uptime_seconds': self.get_uptime_seconds()
+        }
+
+
+# 获取资源监控器单例
+resource_monitor = ResourceMonitor()
 
 
 def get_request_id():
@@ -532,8 +946,21 @@ class Config:
     # 默认模型配置
     DEFAULT_MODEL: str = 'qwen-turbo'
     
-    # 请求超时配置
+    # ========== 超时配置 ==========
+    # 基础 API 请求超时（DashScope API 调用）
     TIMEOUT: int = 30
+    # 默认全局请求超时（秒）- 普通 API 端点
+    DEFAULT_REQUEST_TIMEOUT: int = 30
+    # 长时间操作超时（秒）- 对话、ASR、TTS 等
+    LONG_REQUEST_TIMEOUT: int = 120
+    
+    # ========== 限流配置 ==========
+    # IP 限流：每分钟最大请求数
+    RATE_LIMIT_MAX_REQUESTS: int = 60
+    # IP 限流：时间窗口（秒）
+    RATE_LIMIT_PER_SECONDS: int = 60
+    # 最大并发请求数
+    CONCURRENT_REQUEST_LIMIT: int = 10
     
     # 支持的模型列表
     SUPPORTED_MODELS: List[str] = [
@@ -748,6 +1175,9 @@ if FLASK_AVAILABLE:
     # 导入历史管理器
     from history_manager import get_history_manager
     
+    # 导入唤醒事件存储
+    from sqlite_storage import get_wake_storage
+    
     # 导入上下文管理器
     from context_manager import get_context_manager
     
@@ -777,11 +1207,18 @@ if FLASK_AVAILABLE:
     @v1_bp.before_request
     def before_request():
         """请求前置处理：生成请求 ID"""
+        # #region agent log
+        _debug_log('main.py:v1_before_request:entry', 'v1 before_request entered', {'path': request.path}, 'C')
+        # #endregion
         g.request_id = get_request_id()
         logger.request_id = g.request_id
+        resource_monitor.increment_request_count()
         log_with_data(f"Incoming request: {request.method} {request.path}", 
                      level=logging.INFO, 
                      request_id=g.request_id)
+        # #region agent log
+        _debug_log('main.py:v1_before_request:done', 'v1 before_request done', {'path': request.path}, 'C')
+        # #endregion
     
     @v1_bp.after_request
     def after_request(response):
@@ -1011,14 +1448,144 @@ if FLASK_AVAILABLE:
     
     @v1_bp.route('/health', methods=['GET'])
     def health_check():
-        """健康检查接口"""
+        """
+        健康检查接口
+        
+        返回服务状态、资源使用情况、活跃任务数等信息
+        
+        GET /health
+        
+        Returns:
+            JSON 包含完整健康状态信息
+        """
         log_with_data("Health check requested", request_id=g.request_id)
+        
+        # 获取资源监控数据
+        status = resource_monitor.get_full_status()
+        
+        # 获取上下文统计
+        try:
+            context_manager = get_context_manager()
+            context_stats = context_manager.get_statistics()
+        except Exception:
+            context_stats = {}
+        
         return jsonify({
             'status': 'ok',
             'timestamp': datetime.now().isoformat(),
             'service': 'dashscope-api',
+            'request_id': g.request_id,
+            'uptime': {
+                'seconds': status['uptime_seconds'],
+                'formatted': f"{int(status['uptime_seconds'])}s"
+            },
+            'resources': {
+                'memory': {
+                    'rss_mb': round(status['memory']['rss_mb'], 2),
+                    'vms_mb': round(status['memory']['vms_mb'], 2),
+                    'percent': round(status['memory']['percent'], 2)
+                },
+                'cpu': {
+                    'percent': round(status['cpu']['percent'], 2),
+                    'user_seconds': round(status['cpu']['user_seconds'], 2),
+                    'system_seconds': round(status['cpu']['system_seconds'], 2)
+                }
+            },
+            'tasks': {
+                'active_sessions': status['active_tasks'],
+                'total_requests': status['request_count']
+            },
+            'context': {
+                'total_sessions': context_stats.get('total_sessions', 0),
+                'total_messages': context_stats.get('total_messages', 0)
+            },
+            'rate_limiting': {
+                'enabled': True,
+                'max_requests_per_minute': rate_limiter.max_requests,
+                'current_concurrent_requests': concurrent_limiter.get_current_count(),
+                'max_concurrent_requests': concurrent_limiter.max_concurrent
+            }
+        })
+    
+    @v1_bp.route('/api/v1/rate-limit/status', methods=['GET'])
+    def rate_limit_status():
+        """
+        限流状态查询接口
+        
+        GET /api/v1/rate-limit/status
+        
+        Returns:
+            JSON 包含限流配置和当前状态
+        """
+        log_with_data("Rate limit status requested", request_id=g.request_id)
+        
+        # 获取当前 IP 的请求信息
+        client_ip = request.remote_addr or 'unknown'
+        current_requests = rate_limiter.get_request_count(client_ip)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'config': {
+                    'max_requests_per_minute': rate_limiter.max_requests,
+                    'time_window_seconds': rate_limiter.per_seconds,
+                    'max_concurrent_requests': concurrent_limiter.max_concurrent
+                },
+                'current_ip': {
+                    'ip': client_ip,
+                    'requests_in_window': current_requests,
+                    'remaining_requests': max(0, rate_limiter.max_requests - current_requests)
+                },
+                'server_status': {
+                    'current_concurrent_requests': concurrent_limiter.get_current_count(),
+                    'max_concurrent_requests': concurrent_limiter.max_concurrent
+                }
+            },
             'request_id': g.request_id
         })
+    
+    @v1_bp.route('/metrics', methods=['GET'])
+    def metrics():
+        """
+        Prometheus 格式指标端点
+        
+        GET /metrics
+        
+        Returns:
+            Prometheus 格式的指标数据
+        """
+        status = resource_monitor.get_full_status()
+        
+        # 构建 Prometheus 格式输出
+        metrics_lines = [
+            "# HELP bot_voice_uptime_seconds 服务运行时间（秒）",
+            "# TYPE bot_voice_uptime_seconds counter",
+            f"bot_voice_uptime_seconds {status['uptime_seconds']}",
+            "",
+            "# HELP bot_voice_memory_rss_bytes 实际物理内存使用（字节）",
+            "# TYPE bot_voice_memory_rss_bytes gauge",
+            f"bot_voice_memory_rss_bytes {int(status['memory']['rss_mb'] * 1024 * 1024)}",
+            "",
+            "# HELP bot_voice_memory_percent 内存使用百分比",
+            "# TYPE bot_voice_memory_percent gauge",
+            f"bot_voice_memory_percent {status['memory']['percent']}",
+            "",
+            "# HELP bot_voice_cpu_percent CPU 使用百分比",
+            "# TYPE bot_voice_cpu_percent gauge",
+            f"bot_voice_cpu_percent {status['cpu']['percent']}",
+            "",
+            "# HELP bot_voice_active_sessions 活跃会话数",
+            "# TYPE bot_voice_active_sessions gauge",
+            f"bot_voice_active_sessions {status['active_tasks']}",
+            "",
+            "# HELP bot_voice_total_requests 总请求数",
+            "# TYPE bot_voice_total_requests counter",
+            f"bot_voice_total_requests {status['request_count']}",
+        ]
+        
+        response = make_response('\n'.join(metrics_lines))
+        response.headers['Content-Type'] = 'text/plain; charset=utf-8'
+        return response
     
     @v1_bp.route('/api/v1/csrf-token', methods=['GET'])
     def get_csrf_token():
@@ -1231,6 +1798,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/openclaw/chat', methods=['POST'])
+    @async_timeout(LONG_TIMEOUT)  # 对话接口使用更长超时
     def openclaw_chat():
         """
         通过 OpenClaw 会话处理对话，并总结回复内容用于 TTS
@@ -1796,6 +2364,383 @@ if FLASK_AVAILABLE:
             'request_id': g.request_id
         })
     
+    # ========== 唤醒词管理 API ==========
+    
+    @v1_bp.route('/api/v1/wake-word/stats', methods=['GET'])
+    def get_wake_word_stats():
+        """
+        获取唤醒词统计信息
+        
+        GET /api/v1/wake-word/stats
+        Query params:
+            days: 统计天数 (默认 7, 最大 30)
+        
+        Returns:
+            JSON 包含唤醒次数、成功率等统计
+            
+        Example Response:
+            {
+                "success": true,
+                "data": {
+                    "period_days": 7,
+                    "total_events": 150,
+                    "successful_events": 142,
+                    "success_rate": 94.67,
+                    "today_events": 12,
+                    "today_success": 11,
+                    "today_success_rate": 91.67,
+                    "by_trigger_type": {
+                        "wake_word": 130,
+                        "manual": 20
+                    },
+                    "avg_audio_duration": 2.5,
+                    "daily_stats": [...]
+                },
+                "request_id": "abc123"
+            }
+        """
+        # 验证 days 参数
+        try:
+            days = request.args.get('days', 7, type=int)
+            if days < 1 or days > 30:
+                days = 7
+        except (TypeError, ValueError):
+            days = 7
+        
+        log_with_data(f"Wake word stats requested, days={days}", request_id=g.request_id)
+        
+        wake_storage = get_wake_storage()
+        stats = wake_storage.get_wake_stats(days=days)
+        
+        return jsonify({
+            'success': True,
+            'data': stats,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/wake-word/events', methods=['GET'])
+    def get_wake_word_events():
+        """
+        获取唤醒事件列表
+        
+        GET /api/v1/wake-word/events
+        Query params:
+            limit: 返回数量限制 (默认 50, 最大 200)
+            offset: 偏移量 (默认 0)
+            session_id: 按会话 ID 过滤（可选）
+        
+        Returns:
+            JSON 包含唤醒事件列表
+        """
+        # 验证 limit 参数
+        try:
+            limit = request.args.get('limit', 50, type=int)
+            if limit < 1 or limit > 200:
+                limit = 50
+        except (TypeError, ValueError):
+            limit = 50
+        
+        # 验证 offset 参数
+        try:
+            offset = request.args.get('offset', 0, type=int)
+            if offset < 0:
+                offset = 0
+        except (TypeError, ValueError):
+            offset = 0
+        
+        session_id = request.args.get('session_id')
+        
+        wake_storage = get_wake_storage()
+        
+        if session_id:
+            events = wake_storage.get_wake_events_by_session(session_id, limit=limit)
+        else:
+            events = wake_storage.get_recent_wake_events(limit=limit, offset=offset)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'events': events,
+                'count': len(events),
+                'limit': limit,
+                'offset': offset
+            },
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/wake-word/events', methods=['POST'])
+    @validate_json_content_type
+    def record_wake_event():
+        """
+        记录新的唤醒事件
+        
+        POST /api/v1/wake-word/events
+        Body:
+            session_id: 会话 ID (可选，默认: default)
+            trigger_type: 触发类型 ('wake_word' or 'manual', 默认: 'wake_word')
+            success: 是否成功 (默认: true)
+            audio_duration: 音频时长（秒，可选）
+            metadata: 其他元数据（可选）
+        
+        Returns:
+            JSON 包含创建的事件信息
+            
+        Example Request:
+            {
+                "session_id": "chat-001",
+                "trigger_type": "wake_word",
+                "success": true,
+                "audio_duration": 2.5,
+                "metadata": {"confidence": 0.95}
+            }
+        
+        Example Response:
+            {
+                "success": true,
+                "data": {
+                    "id": 123,
+                    "session_id": "chat-001",
+                    "event_time": "2026-02-02T12:00:00",
+                    "trigger_type": "wake_word",
+                    "success": true,
+                    "audio_duration": 2.5
+                },
+                "request_id": "abc123"
+            }
+        """
+        data = request.get_json() or {}
+        
+        # 获取并验证参数
+        session_id = data.get('session_id', 'default')
+        
+        trigger_type = data.get('trigger_type', 'wake_word')
+        if trigger_type not in ['wake_word', 'manual']:
+            return jsonify({
+                'success': False,
+                'error': 'trigger_type 无效，支持的值: wake_word, manual',
+                'request_id': g.request_id
+            }), 400
+        
+        success = data.get('success', True)
+        if not isinstance(success, bool):
+            success = bool(success)
+        
+        # 验证 audio_duration（如果有）
+        audio_duration = data.get('audio_duration')
+        if audio_duration is not None:
+            try:
+                audio_duration = float(audio_duration)
+                if audio_duration < 0:
+                    audio_duration = None
+            except (TypeError, ValueError):
+                audio_duration = None
+        
+        metadata = data.get('metadata')
+        
+        wake_storage = get_wake_storage()
+        event_id = wake_storage.record_wake_event(
+            session_id=session_id,
+            trigger_type=trigger_type,
+            success=success,
+            audio_duration=audio_duration,
+            metadata=metadata
+        )
+        
+        if event_id is None:
+            return jsonify({
+                'success': False,
+                'error': '记录唤醒事件失败',
+                'request_id': g.request_id
+            }), 500
+        
+        # 获取完整的事件信息
+        event = wake_storage.get_wake_event(event_id)
+        
+        log_with_data(f"Wake event recorded: {event_id}", request_id=g.request_id,
+                     extra_data={'session_id': session_id, 'trigger_type': trigger_type})
+        
+        return jsonify({
+            'success': True,
+            'data': event,
+            'request_id': g.request_id
+        }), 201
+    
+    @v1_bp.route('/api/v1/wake-word/config', methods=['GET'])
+    def get_wake_word_config():
+        """
+        获取唤醒词配置
+        
+        GET /api/v1/wake-word/config
+        
+        Returns:
+            JSON 包含唤醒词配置
+            
+        Example Response:
+            {
+                "success": true,
+                "data": {
+                    "wake_words": ["小爱", " hey siri"],
+                    "sensitivity": 0.8,
+                    "timeout_seconds": 5,
+                    "enabled": true
+                },
+                "request_id": "abc123"
+            }
+        """
+        # 从配置文件或环境变量读取配置
+        config = {
+            'wake_words': [
+                os.environ.get('WAKE_WORD_1', '小爱'),
+                os.environ.get('WAKE_WORD_2', ' hey siri')
+            ],
+            'sensitivity': float(os.environ.get('WAKE_SENSITIVITY', 0.8)),
+            'timeout_seconds': int(os.environ.get('WAKE_TIMEOUT', 5)),
+            'enabled': os.environ.get('WAKE_ENABLED', 'true').lower() == 'true'
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': config,
+            'request_id': g.request_id
+        })
+    
+    @v1_bp.route('/api/v1/wake-word/config', methods=['POST'])
+    @validate_json_content_type
+    @csrf_protected
+    def update_wake_word_config():
+        """
+        更新唤醒词配置
+        
+        POST /api/v1/wake-word/config
+        Body:
+            wake_words: 唤醒词列表
+            sensitivity: 灵敏度 (0-1)
+            timeout_seconds: 超时时间（秒）
+            enabled: 是否启用
+        
+        Returns:
+            JSON 包含更新后的配置
+            
+        Example Request:
+            {
+                "wake_words": ["小爱", " hey siri", "小度"],
+                "sensitivity": 0.9,
+                "timeout_seconds": 3,
+                "enabled": true
+            }
+        """
+        data = request.get_json() or {}
+        
+        updated_config = {}
+        errors = []
+        
+        # 验证并更新 wake_words
+        if 'wake_words' in data:
+            wake_words = data['wake_words']
+            if not isinstance(wake_words, list):
+                errors.append('wake_words 必须是列表')
+            elif len(wake_words) == 0:
+                errors.append('wake_words 不能为空')
+            elif len(wake_words) > 10:
+                errors.append('wake_words 最多支持 10 个')
+            else:
+                # 验证每个唤醒词
+                valid_words = []
+                for word in wake_words:
+                    if not isinstance(word, str):
+                        errors.append('唤醒词必须是字符串')
+                        continue
+                    if len(word) < 1 or len(word) > 20:
+                        errors.append('唤醒词长度必须在 1-20 字符之间')
+                        continue
+                    # 清理唤醒词
+                    valid_words.append(word.strip())
+                
+                if valid_words:
+                    updated_config['wake_words'] = valid_words
+        
+        # 验证并更新 sensitivity
+        if 'sensitivity' in data:
+            try:
+                sensitivity = float(data['sensitivity'])
+                if sensitivity < 0 or sensitivity > 1:
+                    errors.append('sensitivity 必须在 0-1 之间')
+                else:
+                    updated_config['sensitivity'] = sensitivity
+            except (TypeError, ValueError):
+                errors.append('sensitivity 必须是数字')
+        
+        # 验证并更新 timeout_seconds
+        if 'timeout_seconds' in data:
+            try:
+                timeout = int(data['timeout_seconds'])
+                if timeout < 1 or timeout > 30:
+                    errors.append('timeout_seconds 必须在 1-30 之间')
+                else:
+                    updated_config['timeout_seconds'] = timeout
+            except (TypeError, ValueError):
+                errors.append('timeout_seconds 必须是整数')
+        
+        # 验证并更新 enabled
+        if 'enabled' in data:
+            if isinstance(data['enabled'], bool):
+                updated_config['enabled'] = data['enabled']
+            else:
+                errors.append('enabled 必须是布尔值')
+        
+        # 如果有错误，返回错误信息
+        if errors:
+            return jsonify({
+                'success': False,
+                'error': '; '.join(errors),
+                'request_id': g.request_id
+            }), 400
+        
+        # 更新配置到环境变量（仅内存中）
+        for key, value in updated_config.items():
+            env_key = f"WAKE_{key.upper()}"
+            os.environ[env_key] = str(value)
+        
+        log_with_data("Wake word config updated", request_id=g.request_id,
+                     extra_data={'updated_fields': list(updated_config.keys())})
+        
+        # 返回更新后的完整配置
+        return get_wake_word_config()
+    
+    @v1_bp.route('/api/v1/wake-word/cleanup', methods=['DELETE'])
+    @csrf_protected
+    def cleanup_wake_events():
+        """
+        清理旧唤醒事件
+        
+        DELETE /api/v1/wake-word/cleanup
+        Query params:
+            days: 保留最近多少天的记录 (默认 30, 最大 90)
+        
+        Returns:
+            JSON 包含删除的记录数量
+        """
+        # 验证 days 参数
+        try:
+            days = request.args.get('days', 30, type=int)
+            if days < 1 or days > 90:
+                days = 30
+        except (TypeError, ValueError):
+            days = 30
+        
+        wake_storage = get_wake_storage()
+        deleted_count = wake_storage.cleanup_old_wake_events(days=days)
+        
+        log_with_data(f"Cleaned up {deleted_count} old wake events", 
+                     request_id=g.request_id, extra_data={'days': days})
+        
+        return jsonify({
+            'success': True,
+            'message': f'已清理 {deleted_count} 条旧唤醒事件记录',
+            'deleted_count': deleted_count,
+            'request_id': g.request_id
+        })
+    
     # ========== 对话历史管理 API ==========
     
     @v1_bp.route('/api/v1/conversations', methods=['GET'])
@@ -2156,6 +3101,7 @@ if FLASK_AVAILABLE:
         })
     
     @v1_bp.route('/api/v1/asr/recognize', methods=['POST'])
+    @async_timeout(LONG_TIMEOUT)  # ASR 识别使用更长超时
     def asr_recognize():
         """
         语音识别接口（通过 DashScope Fun-ASR API）
@@ -2170,6 +3116,9 @@ if FLASK_AVAILABLE:
         Returns:
             JSON 包含识别结果
         """
+        # #region agent log
+        _debug_log('main.py:asr_recognize:entry', 'ASR handler entered', {'has_file': 'file' in request.files}, 'A')
+        # #endregion
         try:
             from http import HTTPStatus
             from dashscope.audio.asr import Transcription
@@ -2196,7 +3145,22 @@ if FLASK_AVAILABLE:
             audio_file.save(temp_file_path)
             
             try:
-                # 上传音频到 DashScope
+                # 上传音频到 DashScope（显式设置 API Key 和 Base URL，确保使用 .env 中的配置）
+                import dashscope
+                api_key = (Config.DASHSCOPE_API_KEY or os.environ.get('DASHSCOPE_API_KEY', '')).strip()
+                base_url = (os.environ.get('DASHSCOPE_BASE_URL') or Config.DASHSCOPE_BASE_URL or '').strip()
+                dashscope.api_key = api_key
+                if base_url and hasattr(dashscope, 'base_http_api_url'):
+                    dashscope.base_http_api_url = base_url.rstrip('/')
+                # #region agent log
+                _debug_log('main.py:asr:api_key_check', 'API key check', {'len': len(api_key), 'starts_with_sk': api_key.startswith('sk-'), 'base_url_set': bool(base_url)}, 'A')
+                # #endregion
+                if not api_key:
+                    return jsonify({
+                        'success': False,
+                        'error': '未配置 DASHSCOPE_API_KEY。请在 code/backend/.env 中设置',
+                        'request_id': getattr(g, 'request_id', '')
+                    }), 401
                 log_with_data(f"Uploading audio to DashScope...", request_id=g.request_id)
                 
                 upload_response = Files.upload(
@@ -2205,15 +3169,28 @@ if FLASK_AVAILABLE:
                 )
                 
                 if upload_response.status_code != HTTPStatus.OK:
+                    # #region agent log
+                    _debug_log('main.py:asr:upload_fail', 'ASR upload failed', {'msg': getattr(upload_response, 'message', '')}, 'A')
+                    # #endregion
+                    err_msg = getattr(upload_response, 'message', '') or str(upload_response)
+                    if 'Invalid API-key' in err_msg or 'API-key' in err_msg:
+                        return jsonify({
+                            'success': False,
+                            'error': 'API Key 已加载但 DashScope 拒绝。请检查：1) Key 是否在控制台有效且未过期；2) 若使用国际版，在 .env 添加 DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/api/v1',
+                            'request_id': getattr(g, 'request_id', '')
+                        }), 401
                     return jsonify({
                         'success': False,
-                        'error': f'音频上传失败: {upload_response.message}',
-                        'request_id': g.request_id
+                        'error': f'音频上传失败: {err_msg}',
+                        'request_id': getattr(g, 'request_id', '')
                     }), 500
                 
                 # 获取文件 URL（从列表中获取）
                 list_response = Files.list(page=1, page_size=1)
                 if list_response.status_code != HTTPStatus.OK or not list_response.output.get('files'):
+                    # #region agent log
+                    _debug_log('main.py:asr:list_fail', 'ASR Files.list failed', {}, 'A')
+                    # #endregion
                     return jsonify({
                         'success': False,
                         'error': '无法获取上传文件信息',
@@ -2241,6 +3218,9 @@ if FLASK_AVAILABLE:
                 if transcribe_response.status_code == HTTPStatus.OK:
                     task_status = transcribe_response.output.get('task_status', '')
                     if task_status != 'SUCCEEDED':
+                        # #region agent log
+                        _debug_log('main.py:asr:task_fail', 'ASR task not SUCCEEDED', {'status': task_status}, 'A')
+                        # #endregion
                         return jsonify({
                             'success': False,
                             'error': f'语音识别任务失败: {task_status}',
@@ -2250,6 +3230,9 @@ if FLASK_AVAILABLE:
                     # 获取转写结果 URL
                     results = transcribe_response.output.get('results', [])
                     if not results or 'transcription_url' not in results[0]:
+                        # #region agent log
+                        _debug_log('main.py:asr:no_results', 'ASR no transcription_url', {'results_len': len(results) if results else 0}, 'A')
+                        # #endregion
                         return jsonify({
                             'success': False,
                             'error': '无法获取转写结果',
@@ -2275,6 +3258,9 @@ if FLASK_AVAILABLE:
                         'request_id': g.request_id
                     })
                 else:
+                    # #region agent log
+                    _debug_log('main.py:asr:transcribe_fail', 'ASR transcribe status not OK', {'msg': getattr(transcribe_response, 'message', '')}, 'A')
+                    # #endregion
                     return jsonify({
                         'success': False,
                         'error': f'语音识别失败: {transcribe_response.message}',
@@ -2297,6 +3283,9 @@ if FLASK_AVAILABLE:
                 'request_id': g.request_id
             }), 500
         except Exception as e:
+            # #region agent log
+            _debug_log('main.py:asr_recognize:except', 'ASR Exception', {'error': str(e), 'type': type(e).__name__}, 'A')
+            # #endregion
             log_with_data(f"ASR error: {str(e)}", 
                          level=logging.ERROR, request_id=g.request_id)
             return jsonify({
@@ -2306,6 +3295,7 @@ if FLASK_AVAILABLE:
             }), 500
 
     @v1_bp.route('/api/v1/tts/synthesize', methods=['POST'])
+    @async_timeout(LONG_TIMEOUT)  # TTS 合成使用更长超时
     def tts_synthesize():
         """
         语音合成接口（通过 DashScope TTS v2 API）
@@ -2325,6 +3315,10 @@ if FLASK_AVAILABLE:
             from io import BytesIO
             from dashscope.audio.tts_v2 import SpeechSynthesizer, AudioFormat
             from dashscope.audio.tts_v2.speech_synthesizer import ResultCallback
+            
+            # 显式设置 DashScope API Key
+            import dashscope
+            dashscope.api_key = Config.DASHSCOPE_API_KEY or os.environ.get('DASHSCOPE_API_KEY', '')
             
             # 获取请求参数
             data = request.get_json()
@@ -2441,6 +3435,98 @@ if FLASK_AVAILABLE:
     # 注册任务管理路由
     register_task_routes(app)
     
+    # #region agent log
+    @app.before_request
+    def _debug_request_log():
+        _debug_log('main.py:before_request', 'Incoming request', {'method': request.method, 'path': request.path}, 'A')
+    @app.after_request
+    def _debug_response_log(response):
+        try:
+            if response.status_code == 500:
+                _debug_log('main.py:after_request', 'Response 500', {'path': request.path, 'status': 500}, 'A')
+        except Exception:
+            pass
+        return response
+    # #endregion
+    
+    # ========== 全局限流中间件 ==========
+    @app.before_request
+    def rate_limit_middleware():
+        """
+        全局限流中间件
+        对所有请求进行限流检查（排除健康检查端点）
+        """
+        # 排除健康检查和指标端点
+        exempt_paths = ['/health', '/metrics', '/api/v1/csrf-token']
+        if request.path in exempt_paths:
+            return None
+        
+        # 对其他请求进行限流
+        # #region agent log
+        try:
+            allowed, limit_info = rate_limiter.is_allowed()
+        except Exception as ex:
+            _debug_log('main.py:rate_limit', 'RateLimiter exception', {'error': str(ex), 'path': request.path}, 'B')
+            raise
+        # #endregion
+        if not allowed:
+            response = jsonify({
+                'success': False,
+                'error': '请求过于频繁，请稍后再试',
+                'retry_after': limit_info['retry_after'],
+                'request_id': getattr(g, 'request_id', '')
+            })
+            response.status_code = 429
+            response.headers['Retry-After'] = str(limit_info['retry_after'])
+            response.headers['X-RateLimit-Limit'] = str(limit_info['limit'])
+            response.headers['X-RateLimit-Remaining'] = '0'
+            response.headers['X-RateLimit-Reset-After'] = str(limit_info['reset_after'])
+            return response
+        
+        # 在响应中添加限流头信息
+        g.rate_limit_info = limit_info
+        # #region agent log
+        _debug_log('main.py:rate_limit:passed', 'Rate limit passed', {'path': request.path}, 'C')
+        # #endregion
+        return None
+    
+    # ========== 全局限流响应头中间件 ==========
+    @app.after_request
+    def add_rate_limit_headers(response):
+        """为所有响应添加限流头信息"""
+        if hasattr(g, 'rate_limit_info'):
+            limit_info = g.rate_limit_info
+            response.headers['X-RateLimit-Limit'] = str(limit_info['limit'])
+            response.headers['X-RateLimit-Remaining'] = str(limit_info['remaining'])
+            response.headers['X-RateLimit-Reset-After'] = str(limit_info['reset_after'])
+        return response
+    
+    # ========== 全局超时中间件 ==========
+    @app.before_request
+    def timeout_middleware():
+        """
+        全局超时中间件
+        为不同端点设置不同的超时时间
+        """
+        g.request_start_time = time.time()
+        return None
+    
+    # ========== 超时处理错误处理器 ==========
+    @app.errorhandler(RequestTimeout)
+    def handle_timeout(error):
+        """处理请求超时错误"""
+        response = jsonify({
+            'success': False,
+            'error': str(error) if str(error) else '请求超时',
+            'error_type': 'timeout',
+            'request_id': getattr(g, 'request_id', '')
+        })
+        response.status_code = 504
+        log_with_data(f"Request timeout: {request.path}", 
+                     level=logging.WARNING, 
+                     request_id=getattr(g, 'request_id', ''))
+        return response
+    
     # 添加 CORS 支持
     @app.after_request
     def add_cors_headers(response):
@@ -2449,9 +3535,20 @@ if FLASK_AVAILABLE:
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key, X-Request-ID'
         return response
     
-    # HTTPS 强制跳转中间件
-    @app.before_request
-    def force_https():
+    # #region agent log
+    @app.errorhandler(500)
+    def _debug_500_handler(e):
+        try:
+            tb = traceback.format_exc()
+            _debug_log('main.py:500_handler', 'Internal Server Error', {'error': str(e), 'traceback': tb}, 'A')
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e), 'request_id': getattr(g, 'request_id', '')}), 500
+    # #endregion
+    
+    # # HTTPS 强制跳转中间件（本地开发时禁用）
+    # @app.before_request
+    # def force_https():
         """
         检测 HTTP 请求并重定向到 HTTPS
         
@@ -2734,6 +3831,10 @@ def main():
         logger.info("Starting Flask server", extra={'extra_data': {'port': args.port}})
         print(f"\n🚀 启动 Web 服务...")
         print(f"   端口: {args.port}")
+        if Config.DASHSCOPE_API_KEY:
+            print(f"   DASHSCOPE_API_KEY: 已加载 (长度 {len(Config.DASHSCOPE_API_KEY)})")
+        else:
+            print(f"   DASHSCOPE_API_KEY: 未加载")
         print(f"   健康检查: http://localhost:{args.port}/api/v1/health")
         print(f"   对话接口: POST http://localhost:{args.port}/api/v1/chat")
         app.run(host='0.0.0.0', port=args.port, debug=True)

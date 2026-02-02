@@ -13,12 +13,13 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['loaded', 'error'])
+const emit = defineEmits(['loaded', 'error', 'wake-response'])
 
 const canvasRef = ref(null)
 const isLoading = ref(true)
 const model = ref(null)
 const isSpeaking = ref(false)
+const isAwake = ref(false) // 唤醒状态
 
 // 音频分析器
 const { analyzeAudio, getMouthOpenness } = useAudioAnalyzer()
@@ -242,6 +243,81 @@ function randomMotion() {
 }
 
 /**
+ * 唤醒响应动画 - 眨眼 + 表情变化
+ */
+function triggerWakeResponse() {
+  if (!live2DModel) return
+  
+  isAwake.value = true
+  console.log('Live2D: Wake response triggered')
+  
+  // 停止空闲动画
+  stopIdleAnimation()
+  
+  // 1. 快速眨眼 3 次
+  let blinkCount = 0
+  const blinkInterval = setInterval(() => {
+    if (!live2DModel || blinkCount >= 3) {
+      clearInterval(blinkInterval)
+      return
+    }
+    
+    try {
+      // 闭眼
+      live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 0)
+      live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 0)
+      
+      setTimeout(() => {
+        if (live2DModel) {
+          // 睁眼
+          live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 1)
+          live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 1)
+        }
+      }, 150)
+    } catch (e) {
+      // 忽略
+    }
+    
+    blinkCount++
+  }, 400)
+  
+  // 2. 轻微抬头（表示注意到）
+  try {
+    live2DModel.setParameterValue('PARAM_ANGLE_X', 0.1)
+    setTimeout(() => {
+      if (live2DModel) {
+        live2DModel.setParameterValue('PARAM_ANGLE_X', 0)
+      }
+    }, 300)
+  } catch (e) {
+    // 忽略
+  }
+  
+  // 3. 身体轻微晃动（表示活跃）
+  try {
+    live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', 0.05)
+    setTimeout(() => {
+      if (live2DModel) {
+        live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', -0.05)
+        setTimeout(() => {
+          if (live2DModel) {
+            live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', 0)
+          }
+        }, 200)
+      }
+    }, 200)
+  } catch (e) {
+    // 忽略
+  }
+  
+  // 4. 2秒后恢复空闲动画
+  setTimeout(() => {
+    isAwake.value = false
+    startIdleAnimation()
+  }, 2000)
+}
+
+/**
  * 开始说话（外部调用）
  */
 function startSpeaking() {
@@ -288,7 +364,9 @@ defineExpose({
   startSpeaking,
   stopSpeaking,
   loadModel,
-  get speaking() { return isSpeaking.value }
+  triggerWakeResponse,
+  get speaking() { return isSpeaking.value },
+  get isAwake() { return isAwake.value }
 })
 
 onMounted(() => {

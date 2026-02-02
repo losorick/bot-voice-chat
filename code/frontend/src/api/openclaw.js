@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { loading } from '../composables/useLoading'
 
-const API_PORT = 5005
+const API_PORT = 5002
 
 const api = axios.create({
   baseURL: `http://127.0.0.1:${API_PORT}`,
@@ -45,6 +45,11 @@ api.interceptors.response.use(
     loading.hide()
     const message = error.response?.data?.message || error.message
     console.error('API Error:', message)
+    // #region agent log
+    if (error.response?.status === 500) {
+      fetch('http://127.0.0.1:7242/ingest/9fd31da4-8c90-45ce-8957-81ce326dde6d', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'openclaw.js:response', message: 'API 500 error', data: { url: error.config?.url, status: 500, message }, timestamp: Date.now(), sessionId: 'debug-session', hypothesisId: 'E' }) }).catch(() => {})
+    }
+    // #endregion
     return Promise.reject(new Error(message))
   }
 )
