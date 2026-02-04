@@ -47,11 +47,10 @@ export function useWakeWord() {
 
   /**
    * 初始化 Porcupine 引擎
-   * @param {string} wakeWordPath - 唤醒词文件路径 (.ppn)
-   * @param {string} modelPath - 模型文件路径 (.pv)
+   * @param {string} wakeWordPath - 唤醒词文件路径 (.ppn)，相对于 public 目录
    * @param {Object} options - 可选配置
    */
-  async function init(wakeWordPath, modelPath, options = {}) {
+  async function init(wakeWordPath, options = {}) {
     const {
       sensitivity = 0.5,
       endpointDurationSec = 1.0,
@@ -62,23 +61,25 @@ export function useWakeWord() {
       error.value = null
 
       // 创建 Porcupine 实例
+      // Picovoice Web SDK v4.x 的正确用法
       porcupine = await PorcupineWeb.Porcupine.create(
-        [wakeWordPath],
-        [modelPath],
+        [wakeWordPath],  // 唤醒词文件路径数组
         {
-          sensitivity: [sensitivity],
-          endpointDurationSec,
-          chunkLengthSec
+          sensitivity: sensitivity,
+          endpointDurationSec: endpointDurationSec,
+          chunkLengthSec: chunkLengthSec
         }
       )
 
       isInitialized.value = true
       console.log('Porcupine initialized successfully')
+      console.log('Wake word file:', wakeWordPath)
 
       return true
     } catch (err) {
       error.value = err.message
       console.error('Failed to initialize Porcupine:', err)
+      console.error('Error details:', err)
       return false
     }
   }

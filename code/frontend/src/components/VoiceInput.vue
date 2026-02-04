@@ -90,8 +90,7 @@ onMounted(async () => {
   // 初始化唤醒词检测
   try {
     const wakeWordPath = '/wake-word/hey_assistant_zh.ppn'
-    const modelPath = '/wake-word/porcupine_params_zh.pv'
-    await initWakeWord(wakeWordPath, modelPath, { sensitivity: 0.6 })
+    await initWakeWord(wakeWordPath, { sensitivity: 0.6 })
     console.log('Wake word detection initialized')
   } catch (err) {
     console.warn('Failed to initialize wake word detection:', err)
