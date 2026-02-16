@@ -107,9 +107,16 @@ export function useWakeWord() {
             wakeWordDetected.value = true
             console.log('Wake word detected!')
 
-            // 触发唤醒响应状态
+            // 触发唤醒响应状态流程
+            // 1. 先进入 waking 状态 (0.5s)
             enterWakingState()
-            enterRecordingState()
+            
+            // 2. 0.5s 后进入 recording 状态
+            setTimeout(() => {
+              if (wakeResponseState.value === 'waking') {
+                enterRecordingState()
+              }
+            }, 500)
 
             // 触发回调
             onWakeWordCallbacks.forEach(cb => cb())
