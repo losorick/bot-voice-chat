@@ -21,7 +21,7 @@ const countdownInterval = ref(null)
 const waveformCanvas = ref(null)
 const { init: initWaveform, startVisualization, stopVisualization } = useWaveform()
 
-// VAD 语音活动检测
+// VAD 语音活动检测 - 优化参数
 const {
   isSpeechActive,
   currentVolume,
@@ -30,8 +30,8 @@ const {
   onSpeechStart,
   onSpeechEnd
 } = useVAD({
-  threshold: 0.02,
-  endSilenceDuration: 800,
+  threshold: 0.1,           // 0.02 太敏感，0.1 是更合理的默认值
+  endSilenceDuration: 1000, // 800ms 太短，1000ms 减少截断
   minSpeechDuration: 300
 })
 
@@ -90,7 +90,8 @@ onMounted(async () => {
   // 初始化唤醒词检测
   try {
     const wakeWordPath = '/wake-word/hey_assistant_zh.ppn'
-    await initWakeWord(wakeWordPath, { sensitivity: 0.6 })
+    // 0.5 是推荐默认值，0.6 稍高可能增加误检
+    await initWakeWord(wakeWordPath, { sensitivity: 0.5 })
     console.log('Wake word detection initialized')
   } catch (err) {
     console.warn('Failed to initialize wake word detection:', err)

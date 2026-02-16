@@ -19,10 +19,10 @@ export function useWakeWord() {
   let porcupine = null
   let webVoiceProcessor = null
 
-  // 事件回调
-  const onWakeWordCallbacks = []
-  const onWakeResponseCallbacks = [] // 唤醒响应回调
-  const onErrorCallbacks = []
+  // 事件回调 - 使用 Set 避免重复回调
+  const onWakeWordCallbacks = new Set()
+  const onWakeResponseCallbacks = new Set() // 唤醒响应回调
+  const onErrorCallbacks = new Set()
 
   // 唤醒响应状态管理
   function enterWakingState() {
@@ -46,12 +46,23 @@ export function useWakeWord() {
   }
 
   /**
+   * 清理所有回调 - 防止内存泄漏
+   */
+  function clearCallbacks() {
+    onWakeWordCallbacks.clear()
+    onWakeResponseCallbacks.clear()
+    onErrorCallbacks.clear()
+  }
+
+  /**
    * 初始化 Porcupine 引擎
    * @param {string} wakeWordPath - 唤醒词文件路径 (.ppn)，相对于 public 目录
    * @param {Object} options - 可选配置
    */
   async function init(wakeWordPath, options = {}) {
     const {
+      // 灵敏度 0.5 是推荐默认值
+      // 过高(>0.7)会增加误检，过低(<0.3)可能漏检
       sensitivity = 0.5,
       endpointDurationSec = 1.0,
       chunkLengthSec = 0.1
@@ -74,12 +85,14 @@ export function useWakeWord() {
       isInitialized.value = true
       console.log('Porcupine initialized successfully')
       console.log('Wake word file:', wakeWordPath)
+      console.log('Sensitivity:', sensitivity)
 
       return true
     } catch (err) {
       error.value = err.message
       console.error('Failed to initialize Porcupine:', err)
-      console.error('Error details:', err)
+      // 触发错误回调
+      onErrorCallbacks.forEach(cb => cb(err))
       return false
     }
   }
@@ -128,6 +141,7 @@ export function useWakeWord() {
           }
         } catch (err) {
           console.error('Error processing audio frame:', err)
+          onErrorCallbacks.forEach(cb => cb(err))
         }
       }
 
@@ -160,6 +174,7 @@ export function useWakeWord() {
     } catch (err) {
       error.value = err.message
       console.error('Failed to start wake word detection:', err)
+      onErrorCallbacks.forEach(cb => cb(err))
       return false
     }
   }
@@ -183,6 +198,7 @@ export function useWakeWord() {
    */
   function release() {
     stop()
+    clearCallbacks()
 
     if (porcupine) {
       porcupine.release()
@@ -197,25 +213,31 @@ export function useWakeWord() {
   /**
    * 注册唤醒词检测回调
    * @param {Function} callback 
+   * @returns {Function} 取消订阅的函数
    */
   function onWakeWord(callback) {
-    onWakeWordCallbacks.push(callback)
+    onWakeWordCallbacks.add(callback)
+    return () => onWakeWordCallbacks.delete(callback)
   }
 
   /**
    * 注册唤醒响应状态回调
    * @param {Function} callback - 接收状态参数: 'waking' | 'recording' | 'processing' | 'idle'
+   * @returns {Function} 取消订阅的函数
    */
   function onWakeResponse(callback) {
-    onWakeResponseCallbacks.push(callback)
+    onWakeResponseCallbacks.add(callback)
+    return () => onWakeResponseCallbacks.delete(callback)
   }
 
   /**
    * 注册错误回调
    * @param {Function} callback 
+   * @returns {Function} 取消订阅的函数
    */
   function onError(callback) {
-    onErrorCallbacks.push(callback)
+    onErrorCallbacks.add(callback)
+    return () => onErrorCallbacks.delete(callback)
   }
 
   /**

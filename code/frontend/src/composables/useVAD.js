@@ -6,18 +6,22 @@
 import { ref, onUnmounted } from 'vue'
 
 export function useVAD(options = {}) {
-  // 默认配置
+  // 默认配置 - 优化参数
   const config = {
     // 灵敏度阈值 (0-1)，值越低越灵敏
-    threshold: options.threshold || 0.02,
+    // 0.1 是更合理的默认值，0.02 太敏感容易误检
+    threshold: options.threshold || 0.1,
     // 语音结束静音时间 (毫秒)
-    endSilenceDuration: options.endSilenceDuration || 800,
+    // 1000ms 比 800ms 更有利于用户体验，减少截断
+    endSilenceDuration: options.endSilenceDuration || 1000,
     // 最小语音时长 (毫秒)
     minSpeechDuration: options.minSpeechDuration || 300,
     // 采样缓冲区大小
     bufferSize: options.bufferSize || 4096,
     // 平滑系数 (0-1)，用于减少抖动
-    smoothingFactor: options.smoothingFactor || 0.8
+    smoothingFactor: options.smoothingFactor || 0.8,
+    // 静音阈值 - 用于判断是否真正安静
+    silenceThreshold: options.silenceThreshold || 0.01
   }
 
   // 状态
@@ -41,6 +45,7 @@ export function useVAD(options = {}) {
 
   /**
    * 初始化 AudioContext 和 Analyser
+   * 为 VAD 检测优化配置
    */
   function initContext() {
     if (!audioContext) {
@@ -49,26 +54,36 @@ export function useVAD(options = {}) {
     
     if (!analyser) {
       analyser = audioContext.createAnalyser()
+      // 使用较小的 fftSize 以提高响应速度
       analyser.fftSize = config.bufferSize
       analyser.smoothingTimeConstant = config.smoothingFactor
-      analyser.minDecibels = -90
-      analyser.maxDecibels = -10
+      // 对于 VAD，禁用这些设置以获得更准确的原始数据
+      // analyser.minDecibels = -90
+      // analyser.maxDecibels = -10
     }
     
-    dataArray = new Uint8Array(analyser.frequencyBinCount)
+    // 时域数据需要与 fftSize 匹配
+    dataArray = new Uint8Array(analyser.fftSize)
     
     return { audioContext, analyser }
   }
 
   /**
    * 计算当前音量 (RMS)
+   * 使用时域数据(time domain)计算真实的 RMS 值
+   * 而不是使用频域数据(frequency data)
    */
-  function calculateVolume(data) {
+  function calculateVolume(timeDomainData) {
     let sum = 0
-    for (let i = 0; i < data.length; i++) {
-      sum += data[i] * data[i]
+    // 计算 RMS (Root Mean Square)
+    for (let i = 0; i < timeDomainData.length; i++) {
+      // 将无符号 byte 转换为有符号 (-128 到 127)
+      const sample = timeDomainData[i] - 128
+      sum += sample * sample
     }
-    return Math.sqrt(sum / data.length) / 255
+    const rms = Math.sqrt(sum / timeDomainData.length)
+    // 归一化到 0-1 范围
+    return Math.min(rms / 128, 1)
   }
 
   /**
@@ -77,7 +92,9 @@ export function useVAD(options = {}) {
   function detectionLoop() {
     if (!analyser || !isListening.value) return
 
-    analyser.getByteFrequencyData(dataArray)
+    // 使用 getByteTimeDomainData 获取时域数据进行 RMS 计算
+    // 这比频率数据更适合检测语音活动
+    analyser.getByteTimeDomainData(dataArray)
     const volume = calculateVolume(dataArray)
     currentVolume.value = volume
 
