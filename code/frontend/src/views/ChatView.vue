@@ -473,8 +473,8 @@ function playWakeSound() {
 }
 
 .live2d-sidebar {
-  width: 400px;
-  min-width: 300px;
+  width: 600px;
+  min-width: 450px;
   height: 100%;
   background: linear-gradient(180deg, #f5f5f5 0%, #e8e8e8 100%);
   border-right: 1px solid #e0e0e0;
