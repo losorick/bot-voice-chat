@@ -468,6 +468,13 @@ function playWakeSound() {
   padding: 20px;
 }
 
+/* 手机端隐藏 Live2D 侧边栏 */
+@media (max-width: 768px) {
+  .live2d-sidebar {
+    display: none;
+  }
+}
+
 .chat-container {
   flex: 1;
   overflow-y: auto;
