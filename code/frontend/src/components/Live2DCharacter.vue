@@ -1,421 +1,31 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { useAudioAnalyzer } from '../composables/useAudioAnalyzer'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
-  modelUrl: {
-    type: String,
-    default: '/models/live2d/haru/haru_greeter_t03.model3.json'
-  },
   autoPlay: {
     type: Boolean,
     default: true
   }
 })
 
-const emit = defineEmits(['loaded', 'error', 'wake-response'])
+const emit = defineEmits(['loaded', 'error'])
 
-const canvasRef = ref(null)
+const iframeRef = ref(null)
 const isLoading = ref(true)
-const model = ref(null)
-const isSpeaking = ref(false)
-const isAwake = ref(false) // 唤醒状态
 
-// 音频分析器
-const { analyzeAudio, getMouthOpenness } = useAudioAnalyzer()
-
-// Live2D 模型实例
-let live2DModel = null
-let app = null
-
-/**
- * 加载 Live2D 模型
- * 注意：Live2D 功能暂时禁用，等待后续修复
- */
-async function loadModel() {
-  try {
-    isLoading.value = true
-    
-    // TODO: Live2D 功能暂时禁用，等待修复
-    // 原因：PIXI 与 pixi-live2d-display 加载顺序问题
-    console.log('Live2D loading disabled temporarily')
-    isLoading.value = false
-    emit('loaded', null)
-    return
-    
-    // 以下是之前尝试的代码，保留用于后续调试...
-    if (!window.PIXI) {
-      await loadScript('https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/pixi.min.js')
-    }
-    
-    // 2. 暴露 PIXI 到 window（必须在加载 pixi-live2d-display 之前）
-    window.PIXI = window.PIXI || window._PIXI
-    
-    // 3. 加载 pixi-live2d-display cubism4 版本 (CDN)
-    if (!window.PIXI?.live2d) {
-      await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js')
-    }
-    
-    // 4. 加载 Live2D Cubism Core 4 (本地)
-    if (!window.Live2DCubismCore) {
-      await loadScript('/live2dcubismcore.min.js')
-    }
-    
-    // 等待加载完成
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    
-    // 调试日志
-    console.log('PIXI:', !!window.PIXI)
-    console.log('PIXI.Application:', !!window.PIXI?.Application)
-    console.log('PIXI.live2d:', !!window.PIXI?.live2d)
-    console.log('Live2DCubismCore:', !!window.Live2DCubismCore)
-    
-    // 验证
-    if (!window.PIXI || !window.PIXI.Application) {
-      throw new Error('PIXI 未正确加载')
-    }
-    if (!window.PIXI.live2d) {
-      throw new Error('PIXI live2d 插件未加载')
-    }
-    if (!window.Live2DCubismCore) {
-      throw new Error('Live2D Cubism Core 未加载')
-    }
-    
-    // 创建 PIXI 应用
-    const PIXI = window.PIXI
-    app = new PIXI.Application({
-      view: canvasRef.value,
-      width: 400,
-      height: 500,
-      backgroundAlpha: 0,
-      resolution: window.devicePixelRatio || 1,
-      autoDensity: true
-    })
-    
-    // 加载 Live2D 模型
-    const { Live2DModel } = window.PIXI.live2d
-    
-    // 获取完整的模型 URL
-    const fullModelUrl = props.modelUrl.startsWith('/') 
-      ? props.modelUrl 
-      : `/${props.modelUrl}`
-    
-    live2DModel = await Live2DModel.from(fullModelUrl)
-    
-    // 设置模型位置和大小
-    live2DModel.position.set(200, 280)
-    live2DModel.scale.set(0.35, 0.35)
-    live2DModel.anchor.set(0.5, 0.5)
-    
-    app.stage.addChild(live2DModel)
-    
-    // 注册 Ticker 用于自动更新
-    Live2DModel.registerTicker(PIXI.Ticker)
-    
-    isLoading.value = false
-    model.value = live2DModel
-    emit('loaded', live2DModel)
-    
-    // 启动空闲动画
-    startIdleAnimation()
-    
-  } catch (error) {
-    console.error('Failed to load Live2D model:', error)
-    isLoading.value = false
-    emit('error', error)
-  }
+// 监听 iframe 加载完成
+function handleIframeLoad() {
+  isLoading.value = false
+  emit('loaded', true)
 }
 
-/**
- * 加载脚本（安全版本，返回是否成功）
- */
-function loadScriptSafe(src) {
-  return new Promise((resolve) => {
-    const script = document.createElement('script')
-    script.src = src
-    script.onload = () => resolve(true)
-    script.onerror = () => resolve(false)
-    document.head.appendChild(script)
-  })
-}
-
-/**
- * 加载脚本（失败抛错）
- */
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script')
-    script.src = src
-    script.onload = resolve
-    script.onerror = reject
-    document.head.appendChild(script)
-  })
-}
-
-/**
- * 设置嘴巴开合度
- */
-function setMouthOpen(value) {
-  if (!live2DModel) return
-  
-  // 映射音量到嘴巴开合 (0-1)
-  const mouthOpen = Math.min(1, Math.max(0, value))
-  
-  try {
-    live2DModel.setParameterValue('PARAM_MOUTH_OPEN_Y', mouthOpen * 1.5)
-  } catch (e) {
-    // 如果模型不支持，忽略
-  }
-}
-
-/**
- * 说话动画状态
- */
-let talkingInterval = null
-let idleInterval = null
-
-function startTalkingAnimation() {
-  if (!live2DModel) return
-  
-  // 停止空闲动画
-  stopIdleAnimation()
-  
-  // 说话时添加轻微身体晃动
-  talkingInterval = setInterval(() => {
-    if (live2DModel && !isSpeaking.value) return
-    
-    const breathe = Math.sin(Date.now() / 500) * 0.02
-    const tilt = Math.sin(Date.now() / 300) * 0.03
-    
-    try {
-      live2DModel.setParameterValue('PARAM_BODY_ANGLE_X', tilt)
-      live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
-    } catch (e) {
-      // 忽略
-    }
-  }, 50)
-}
-
-function stopTalkingAnimation() {
-  if (talkingInterval) {
-    clearInterval(talkingInterval)
-    talkingInterval = null
-  }
-  
-  // 恢复空闲动画
-  startIdleAnimation()
-}
-
-/**
- * 空闲动画（呼吸效果）
- */
-function startIdleAnimation() {
-  if (!live2DModel || idleInterval) return
-  
-  idleInterval = setInterval(() => {
-    if (!live2DModel || isSpeaking.value) return
-    
-    // 轻微呼吸效果
-    const breathe = Math.sin(Date.now() / 2000) * 0.01
-    
-    try {
-      live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', breathe)
-      
-      // 眼睛微动 - 随机眨眼
-      if (Math.random() < 0.002) {
-        live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 0)
-        live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 0)
-        setTimeout(() => {
-          if (live2DModel) {
-            live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 1)
-            live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 1)
-          }
-        }, 150)
-      }
-    } catch (e) {
-      // 忽略
-    }
-  }, 50)
-}
-
-function stopIdleAnimation() {
-  if (idleInterval) {
-    clearInterval(idleInterval)
-    idleInterval = null
-  }
-}
-
-/**
- * 随机动作
- */
-function randomMotion() {
-  if (!live2DModel || isSpeaking.value) return
-  
-  try {
-    const motions = [
-      { param: 'PARAM_ANGLE_X', value: 0.05 },
-      { param: 'PARAM_BODY_ANGLE_X', value: 0.03 },
-      { param: 'PARAM_ARM_L_L', value: 0.05 },
-      { param: 'PARAM_ARM_R_L', value: 0.05 }
-    ]
-    
-    const motion = motions[Math.floor(Math.random() * motions.length)]
-    const currentValue = live2DModel.getParameterValue(motion.param) || 0
-    live2DModel.setParameterValue(motion.param, currentValue + motion.value)
-    
-    setTimeout(() => {
-      if (live2DModel) {
-        live2DModel.setParameterValue(motion.param, currentValue)
-      }
-    }, 300)
-  } catch (e) {
-    // 忽略
-  }
-}
-
-/**
- * 唤醒响应动画 - 眨眼 + 表情变化
- */
-function triggerWakeResponse() {
-  if (!live2DModel) return
-  
-  isAwake.value = true
-  console.log('Live2D: Wake response triggered')
-  
-  // 停止空闲动画
-  stopIdleAnimation()
-  
-  // 1. 快速眨眼 3 次
-  let blinkCount = 0
-  const blinkInterval = setInterval(() => {
-    if (!live2DModel || blinkCount >= 3) {
-      clearInterval(blinkInterval)
-      return
-    }
-    
-    try {
-      // 闭眼
-      live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 0)
-      live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 0)
-      
-      setTimeout(() => {
-        if (live2DModel) {
-          // 睁眼
-          live2DModel.setParameterValue('PARAM_EYE_L_OPEN', 1)
-          live2DModel.setParameterValue('PARAM_EYE_R_OPEN', 1)
-        }
-      }, 150)
-    } catch (e) {
-      // 忽略
-    }
-    
-    blinkCount++
-  }, 400)
-  
-  // 2. 轻微抬头（表示注意到）
-  try {
-    live2DModel.setParameterValue('PARAM_ANGLE_X', 0.1)
-    setTimeout(() => {
-      if (live2DModel) {
-        live2DModel.setParameterValue('PARAM_ANGLE_X', 0)
-      }
-    }, 300)
-  } catch (e) {
-    // 忽略
-  }
-  
-  // 3. 身体轻微晃动（表示活跃）
-  try {
-    live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', 0.05)
-    setTimeout(() => {
-      if (live2DModel) {
-        live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', -0.05)
-        setTimeout(() => {
-          if (live2DModel) {
-            live2DModel.setParameterValue('PARAM_BODY_ANGLE_Z', 0)
-          }
-        }, 200)
-      }
-    }, 200)
-  } catch (e) {
-    // 忽略
-  }
-  
-  // 4. 2秒后恢复空闲动画
-  setTimeout(() => {
-    isAwake.value = false
-    startIdleAnimation()
-  }, 2000)
-}
-
-/**
- * 开始说话（外部调用）
- */
-function startSpeaking() {
-  isSpeaking.value = true
-  startTalkingAnimation()
-}
-
-/**
- * 停止说话（外部调用）
- */
-function stopSpeaking() {
-  isSpeaking.value = false
-  stopTalkingAnimation()
-  setMouthOpen(0)
-}
-
-/**
- * 播放说话动画
- */
-function speak(audioUrl) {
-  if (!live2DModel) return
-  
-  const audio = new Audio(audioUrl)
-  
-  audio.onplay = () => {
-    startTalkingAnimation()
-    
-    // 分析音频音量控制嘴巴
-    analyzeAudio(audio, (mouthValue) => {
-      setMouthOpen(mouthValue)
-    })
-  }
-  
-  audio.onended = () => {
-    stopTalkingAnimation()
-  }
-  
-  audio.play()
-}
-
-// 暴露方法给父组件
+// 暴露方法
 defineExpose({
-  speak,
-  startSpeaking,
-  stopSpeaking,
-  loadModel,
-  triggerWakeResponse,
-  get speaking() { return isSpeaking.value },
-  get isAwake() { return isAwake.value }
+  get iframe() { return iframeRef.value }
 })
 
 onMounted(() => {
-  if (props.autoPlay) {
-    loadModel()
-  }
-  
-  // 随机触发小动作
-  setInterval(randomMotion, 5000)
-})
-
-onUnmounted(() => {
-  stopTalkingAnimation()
-  stopIdleAnimation()
-  
-  if (app) {
-    app.destroy(true)
-  }
+  // iframe 会自动加载
 })
 </script>
 
@@ -424,40 +34,37 @@ onUnmounted(() => {
     <!-- 加载状态 -->
     <div v-if="isLoading" class="loading-overlay">
       <div class="loading-spinner"></div>
-      <p>加载 Live2D 模型中...</p>
+      <p>加载 Live2D 中...</p>
     </div>
     
-    <!-- Live2D Canvas -->
-    <canvas 
-      ref="canvasRef" 
-      class="live2d-canvas"
-      width="400"
-      height="500"
-    ></canvas>
-    
-    <!-- 控制按钮 -->
-    <div class="live2d-controls">
-      <button @click="startSpeaking" :disabled="!model">开始说话</button>
-      <button @click="stopSpeaking" :disabled="!model">停止说话</button>
-    </div>
+    <!-- Live2D iframe -->
+    <iframe 
+      ref="iframeRef"
+      src="/live2d-standalone.html"
+      class="live2d-iframe"
+      @load="handleIframeLoad"
+      frameborder="0"
+      allowfullscreen
+    ></iframe>
   </div>
 </template>
 
 <style scoped>
 .live2d-container {
   position: relative;
-  width: 400px;
-  height: 500px;
+  width: 100%;
+  height: 100%;
   background: linear-gradient(180deg, #f5f5f5 0%, #e8e8e8 100%);
   border-radius: 20px;
   overflow: hidden;
   box-shadow: 0 10px 40px rgba(0,0,0,0.1);
 }
 
-.live2d-canvas {
+.live2d-iframe {
   width: 100%;
   height: 100%;
-  display: block;
+  border: none;
+  background: transparent;
 }
 
 .loading-overlay {
@@ -470,7 +77,7 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.95);
   z-index: 10;
 }
 
@@ -491,36 +98,5 @@ onUnmounted(() => {
   margin-top: 16px;
   color: #666;
   font-size: 14px;
-}
-
-.live2d-controls {
-  position: absolute;
-  bottom: 16px;
-  left: 0;
-  right: 0;
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
-
-.live2d-controls button {
-  padding: 8px 20px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 20px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.3s;
-}
-
-.live2d-controls button:hover:not(:disabled) {
-  transform: scale(1.05);
-  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
-}
-
-.live2d-controls button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 </style>

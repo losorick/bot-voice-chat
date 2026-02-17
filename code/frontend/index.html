@@ -5,36 +5,9 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bot 语音聊天</title>
-    <!-- Live2D Widget 自定义样式 - 居中显示 -->
-    <style>
-      #waifu {
-        left: 50% !important;
-        bottom: 50px !important;
-        transform: translateX(-50%) !important;
-        transition: transform .3s ease-in-out, bottom 3s ease-in-out, left .3s ease-in-out !important;
-      }
-      #waifu.waifu-active {
-        bottom: 50px !important;
-      }
-      #waifu:hover {
-        transform: translateX(-50%) translateY(20px) !important;
-      }
-      /* 隐藏原位置的工具栏按钮 */
-      #waifu-toggle {
-        display: none !important;
-      }
-      /* 调整提示框位置 */
-      #waifu-tips {
-        left: 50% !important;
-        transform: translateX(-50%);
-        margin-left: -125px !important;
-      }
-    </style>
   </head>
   <body>
     <div id="app"></div>
     <script type="module" src="/src/main.js"></script>
-    <!-- Live2D Widget -->
-    <script src="/live2d-widget-temp/dist/autoload.js"></script>
   </body>
 </html>
