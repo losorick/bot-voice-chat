@@ -9,7 +9,9 @@ export default defineConfig({
       'localhost',
       '.trycloudflare.com',
       '.serveousercontent.com',
-      '.loca.lt'
+      '.loca.lt',
+      'mmchong.games',
+      '.mmchong.games'
     ],
     proxy: {
       '/api': {

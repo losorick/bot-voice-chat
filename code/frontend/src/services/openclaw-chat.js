@@ -2,10 +2,11 @@
  * OpenClaw 会话对话服务
  * 通过 OpenClaw subagent 处理语音对话
  */
+import { API_BASE_URL } from '../config/api'
 
 class OpenClawService {
   constructor() {
-    this.baseUrl = 'http://localhost:5002'
+    this.baseUrl = API_BASE_URL
     this.label = 'voice-chat'
   }
 

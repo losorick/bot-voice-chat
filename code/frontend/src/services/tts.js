@@ -1,5 +1,6 @@
 import { errorHandler, handleTTSError, handleNetworkError } from '../composables/useError'
 import { useSpeechInterrupt } from '../composables/useSpeechInterrupt'
+import { API_BASE_URL } from '../config/api'
 
 /**
  * DashScope TTS (语音合成) 服务
@@ -14,7 +15,7 @@ class TTSService {
     this.onSpeechInterrupt = null
     this.speechInterrupt = null
     this.isPlaying = false
-    this.baseUrl = 'http://localhost:5002'
+    this.baseUrl = API_BASE_URL
   }
 
   /**

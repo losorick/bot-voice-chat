@@ -1,10 +1,9 @@
 import axios from 'axios'
 import { loading } from '../composables/useLoading'
-
-const API_PORT = 5002
+import { API_BASE_URL } from '../config/api'
 
 const api = axios.create({
-  baseURL: `http://127.0.0.1:${API_PORT}`,
+  baseURL: API_BASE_URL,
   timeout: 30000
 })
 

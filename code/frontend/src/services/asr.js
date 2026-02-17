@@ -1,4 +1,5 @@
 import { errorHandler, handleASRError, handleNetworkError } from '../composables/useError'
+import { API_BASE_URL } from '../config/api'
 
 /**
  * 阿里云 ASR (语音识别) 服务
@@ -92,7 +93,7 @@ class ASRService {
       formData.append('model', 'fun-asr-mtl') // 使用 DashScope Fun-ASR 模型
 
       // 调用后端语音识别接口
-      const response = await fetch('http://localhost:5002/api/v1/asr/recognize', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/asr/recognize`, {
         method: 'POST',
         body: formData
       })
