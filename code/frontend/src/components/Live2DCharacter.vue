@@ -43,14 +43,14 @@ async function loadModel() {
     // 2. 暴露 PIXI 到 window（必须在加载 pixi-live2d-display 之前）
     window.PIXI = window.PIXI || window._PIXI
     
-    // 3. 加载 pixi-live2d-display (CDN)
+    // 3. 加载 pixi-live2d-display cubism4 版本 (CDN)
     if (!window.PIXI?.live2d) {
-      await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js')
+      await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js')
     }
     
-    // 4. 加载 Live2D Cubism Core (本地)
+    // 4. 加载 Live2D Cubism Core 4 (本地)
     if (!window.Live2DCubismCore) {
-      await loadScript('/live2d.min.js')
+      await loadScript('/live2dcubismcore.min.js')
     }
     
     // 等待加载完成
