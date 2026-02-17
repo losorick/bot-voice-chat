@@ -30,12 +30,20 @@ let app = null
 
 /**
  * 加载 Live2D 模型
+ * 注意：Live2D 功能暂时禁用，等待后续修复
  */
 async function loadModel() {
   try {
     isLoading.value = true
     
-    // 1. 先加载 PIXI v6 (CDN)
+    // TODO: Live2D 功能暂时禁用，等待修复
+    // 原因：PIXI 与 pixi-live2d-display 加载顺序问题
+    console.log('Live2D loading disabled temporarily')
+    isLoading.value = false
+    emit('loaded', null)
+    return
+    
+    // 以下是之前尝试的代码，保留用于后续调试...
     if (!window.PIXI) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/pixi.min.js')
     }
