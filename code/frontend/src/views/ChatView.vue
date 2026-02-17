@@ -325,10 +325,15 @@ function playWakeSound() {
     </header>
 
     <div class="chat-layout">
-      <!-- 左侧 Live2D -->
+      <!-- 左侧 Live2D (电脑端) -->
       <aside v-if="showLive2D" class="live2d-sidebar">
         <Live2DCharacter ref="live2dRef" />
       </aside>
+
+      <!-- 手机端居中 Live2D -->
+      <div v-if="showLive2D" class="live2d-mobile">
+        <iframe src="/live2d-standalone.html" frameborder="0" allowfullscreen></iframe>
+      </div>
 
       <!-- 右侧聊天区域 -->
       <main class="chat-container" ref="messageContainer">
@@ -468,10 +473,29 @@ function playWakeSound() {
   padding: 20px;
 }
 
-/* 手机端隐藏 Live2D 侧边栏 */
+/* 电脑端隐藏手机端 Live2D */
+.live2d-mobile {
+  display: none;
+}
+
+/* 手机端居中展示 Live2D */
 @media (max-width: 768px) {
   .live2d-sidebar {
     display: none;
+  }
+  .live2d-mobile {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 10px 0;
+    background: linear-gradient(180deg, #f5f5f5 0%, #e8e8e8 100%);
+  }
+  .live2d-mobile iframe {
+    width: 500px;
+    height: 400px;
+    border: none;
+    border-radius: 16px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.1);
   }
 }
 
