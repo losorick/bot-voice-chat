@@ -35,25 +35,26 @@ async function loadModel() {
   try {
     isLoading.value = true
     
-    // 1. 先加载 PIXI v6
+    // 1. 先加载 PIXI v6 (CDN)
     if (!window.PIXI) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/pixi.min.js')
-      // 暴露 PIXI 到 window（pixi-live2d-display 需要）
-      window.PIXI = window.PIXI || window._PIXI
     }
     
-    // 2. 加载 pixi-live2d-display (必须在 PIXI 之后)
+    // 2. 暴露 PIXI 到 window（必须在加载 pixi-live2d-display 之前）
+    window.PIXI = window.PIXI || window._PIXI
+    
+    // 3. 加载 pixi-live2d-display (CDN)
     if (!window.PIXI?.live2d) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js')
     }
     
-    // 3. 加载 Live2D Cubism Core (for 2.1 models like Haru)
+    // 4. 加载 Live2D Cubism Core (本地)
     if (!window.Live2DCubismCore) {
-      await loadScript('https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js')
+      await loadScript('/live2d.min.js')
     }
     
     // 等待加载完成
-    await new Promise(resolve => setTimeout(resolve, 500))
+    await new Promise(resolve => setTimeout(resolve, 1000))
     
     // 调试日志
     console.log('PIXI:', !!window.PIXI)
@@ -67,6 +68,9 @@ async function loadModel() {
     }
     if (!window.PIXI.live2d) {
       throw new Error('PIXI live2d 插件未加载')
+    }
+    if (!window.Live2DCubismCore) {
+      throw new Error('Live2D Cubism Core 未加载')
     }
     
     // 创建 PIXI 应用
