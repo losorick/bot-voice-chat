@@ -318,22 +318,6 @@ function playWakeSound() {
     <header class="chat-header">
       <h1>🤖 Bot 语音助手</h1>
       <div class="header-actions">
-        <label class="auto-play">
-          <input 
-            type="checkbox" 
-            :checked="isAutoPlay" 
-            @change="toggleAutoPlay"
-          />
-          🔊 自动播放
-        </label>
-        <label class="live2d-toggle">
-          <input 
-            type="checkbox" 
-            :checked="showLive2D" 
-            @change="showLive2D = !showLive2D"
-          />
-          🎨 Live2D
-        </label>
         <router-link to="/settings" class="settings-btn">
           ⚙️ 设置
         </router-link>

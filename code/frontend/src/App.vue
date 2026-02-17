@@ -1,17 +1,10 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { RouterView } from 'vue-router'
-import TaskStatusCard from './components/TaskStatusCard.vue'
 import LoadingSpinner from './components/LoadingSpinner.vue'
 import ErrorToast from './components/ErrorToast.vue'
 import { loading } from './composables/useLoading'
 import { errorHandler } from './composables/useError'
-
-const showTaskStatus = ref(false)
-
-function toggleTaskStatus() {
-  showTaskStatus.value = !showTaskStatus.value
-}
 
 // 关闭错误提示
 function handleErrorClose(errorId) {
@@ -44,19 +37,6 @@ function handleErrorClose(errorId) {
       @close="handleErrorClose(error.id)"
     />
     
-    <!-- 任务状态栏（可折叠） -->
-    <div class="task-status-section" :class="{ collapsed: !showTaskStatus }">
-      <button class="toggle-btn" @click="toggleTaskStatus">
-        {{ showTaskStatus ? '📊 隐藏任务状态' : '📊 显示任务状态' }}
-      </button>
-      
-      <Transition name="slide-down">
-        <div v-if="showTaskStatus" class="task-status-wrapper">
-          <TaskStatusCard />
-        </div>
-      </Transition>
-    </div>
-    
     <!-- 主内容区 -->
     <main class="main-content">
       <RouterView />
@@ -82,38 +62,6 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
-}
-
-.task-status-section {
-  background: #f0f0f0;
-  padding: 0 16px;
-  transition: all 0.3s;
-}
-
-.task-status-section.collapsed {
-  padding: 8px 16px;
-  background: #e8e8e8;
-}
-
-.toggle-btn {
-  padding: 6px 12px;
-  background: transparent;
-  border: none;
-  font-size: 12px;
-  color: #666;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.2s;
-}
-
-.toggle-btn:hover {
-  opacity: 1;
-}
-
-.task-status-wrapper {
-  padding: 8px 0 16px;
-  max-width: 600px;
-  margin: 0 auto;
 }
 
 .main-content {
