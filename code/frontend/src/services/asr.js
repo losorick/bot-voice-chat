@@ -35,6 +35,14 @@ class ASRService {
    */
   async start() {
     try {
+      // 检查麦克风是否可用
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        const error = new Error('浏览器不支持麦克风访问，请使用 HTTPS 访问')
+        error.type = 'MIC_NOT_SUPPORTED'
+        if (this.onError) this.onError(error)
+        return
+      }
+      
       // 获取麦克风权限
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {

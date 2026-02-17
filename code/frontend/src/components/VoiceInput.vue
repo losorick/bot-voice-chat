@@ -231,12 +231,22 @@ async function initVisualization() {
 async function startRecording() {
   if (!isSupported.value || useVADMode.value) return
   
+  // 检查麦克风是否可用
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert('请使用 HTTPS 访问以使用语音功能，或检查浏览器权限')
+    return
+  }
+  
   chatStore.setListening(true)
   chatStore.clearTranscript()
   buttonText.value = '监听中...'
   
   // 初始化波形可视化
-  await initVisualization()
+  try {
+    await initVisualization()
+  } catch (error) {
+    console.warn('Visualization init failed:', error)
+  }
   
   // 使用阿里云 ASR
   ASRService.start()
