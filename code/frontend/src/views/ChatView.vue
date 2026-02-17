@@ -492,7 +492,7 @@ function playWakeSound() {
   }
   .live2d-mobile iframe {
     width: 500px;
-    height: 400px;
+    height: 600px;
     border: none;
     border-radius: 16px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.1);
