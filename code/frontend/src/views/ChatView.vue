@@ -340,40 +340,44 @@ function playWakeSound() {
       </div>
     </header>
 
-    <main class="chat-container" ref="messageContainer">
-      <!-- Live2D 虚拟形象 -->
-      <div v-if="showLive2D" class="live2d-wrapper">
+    <div class="chat-layout">
+      <!-- 左侧 Live2D -->
+      <aside v-if="showLive2D" class="live2d-sidebar">
         <Live2DCharacter ref="live2dRef" />
-      </div>
-      <div v-if="chatStore.messages.length === 0" class="welcome">
-        <div class="welcome-icon">👋</div>
-        <h2>你好！我是 Bot 语音助手</h2>
-        <p>我可以与你对话，按住下方按钮开始语音交流</p>
-      </div>
+      </aside>
 
-      <div v-else class="messages">
-        <MessageBubble
-          v-for="(msg, index) in chatStore.messages"
-          :key="index"
-          :role="msg.role"
-          :content="msg.content"
-          :timestamp="msg.timestamp"
-        />
-      </div>
-
-      <div v-if="chatStore.isLoading" class="loading">
-        <span class="dot"></span>
-        <span class="dot"></span>
-        <span class="dot"></span>
-      </div>
-
-      <!-- 语音打断提示 -->
-      <Transition name="fade">
-        <div v-if="isSpeechInterrupted" class="interrupt-toast">
-          🛑 语音已中断，请继续说话
+      <!-- 右侧聊天区域 -->
+      <main class="chat-container" ref="messageContainer">
+        <div v-if="chatStore.messages.length === 0" class="welcome">
+          <div class="welcome-icon">👋</div>
+          <h2>你好！我是 Bot 语音助手</h2>
+          <p>我可以与你对话，按住下方按钮开始语音交流</p>
         </div>
-      </Transition>
-    </main>
+
+        <div v-else class="messages">
+          <MessageBubble
+            v-for="(msg, index) in chatStore.messages"
+            :key="index"
+            :role="msg.role"
+            :content="msg.content"
+            :timestamp="msg.timestamp"
+          />
+        </div>
+
+        <div v-if="chatStore.isLoading" class="loading">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </div>
+
+        <!-- 语音打断提示 -->
+        <Transition name="fade">
+          <div v-if="isSpeechInterrupted" class="interrupt-toast">
+            🛑 语音已中断，请继续说话
+          </div>
+        </Transition>
+      </main>
+    </div>
 
     <footer class="chat-footer">
       <div class="input-area">
@@ -461,6 +465,25 @@ function playWakeSound() {
   background: #e0e0e0;
 }
 
+/* 新增：聊天布局 - 左侧 Live2D，右侧聊天 */
+.chat-layout {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.live2d-sidebar {
+  width: 400px;
+  min-width: 300px;
+  height: 100%;
+  background: linear-gradient(180deg, #f5f5f5 0%, #e8e8e8 100%);
+  border-right: 1px solid #e0e0e0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 20px;
+}
+
 .chat-container {
   flex: 1;
   overflow-y: auto;
@@ -468,16 +491,6 @@ function playWakeSound() {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.live2d-wrapper {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  display: flex;
-  justify-content: center;
-  padding: 8px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 100%);
 }
 
 .welcome {
