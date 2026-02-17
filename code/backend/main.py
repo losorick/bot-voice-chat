@@ -1837,6 +1837,15 @@ if FLASK_AVAILABLE:
             session_label = data.get('session_label', 'voice-chat')
             need_tts = data.get('need_tts', True)
             
+            # ========== 判断消息长度是否需要播放语音 ==========
+            # 如果用户输入小于 32 个字符，不播放等待语音和 TTS
+            message_length = len(message)
+            need_audio = message_length >= 32
+            
+            if not need_audio:
+                log_with_data(f"Message length {message_length} < 32, skipping audio playback", 
+                             request_id=g.request_id)
+            
             # ========== 多轮对话上下文管理 ==========
             conversation_id = data.get('conversation_id')
             system_prompt = data.get('system_prompt')
@@ -1941,11 +1950,12 @@ if FLASK_AVAILABLE:
                 'success': True,
                 'reply': reply,
                 'conversation_id': conversation_id,
-                'request_id': g.request_id
+                'request_id': g.request_id,
+                'need_audio': need_audio  # 告诉前端是否需要播放等待音效和 TTS
             }
             
             # ========== 步骤 2: Sub-agent 总结回复（用于 TTS）==========
-            if need_tts:
+            if need_tts and need_audio:
                 log_with_data("Starting sub-agent to summarize reply for TTS", 
                              request_id=g.request_id)
                 
@@ -3837,7 +3847,7 @@ def main():
             print(f"   DASHSCOPE_API_KEY: 未加载")
         print(f"   健康检查: http://localhost:{args.port}/api/v1/health")
         print(f"   对话接口: POST http://localhost:{args.port}/api/v1/chat")
-        app.run(host='0.0.0.0', port=args.port, debug=True)
+        app.run(host='0.0.0.0', port=args.port, debug=False)
     else:
         # 默认运行测试
         run_all_tests()

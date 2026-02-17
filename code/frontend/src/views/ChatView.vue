@@ -105,17 +105,24 @@ async function sendMessage(content = null) {
   const text = content || userInput.value.trim()
   if (!text) return
 
+  // 判断是否为短消息（<32字符不播放等待/完成语音）
+  const isShortMessage = text.length < 32
+
   // 添加用户消息
   chatStore.addMessage('user', text)
   if (!content) userInput.value = ''
   chatStore.isLoading = true
   isSpeechInterrupted.value = false
 
-  // ① 发送后立即播放确认类语音
-  playWaitAudio('confirm')
+  // ① 发送后立即播放确认类语音（短消息不播放）
+  if (!isShortMessage) {
+    playWaitAudio('confirm')
+  }
   
-  // 设置超时定时器（90-120秒后播放 waiting 语音）
-  scheduleWaitingAudio()
+  // 设置超时定时器（90-120秒后播放 waiting 语音）（短消息不播放）
+  if (!isShortMessage) {
+    scheduleWaitingAudio()
+  }
 
   try {
     // 通过 OpenClaw 会话获取回复（包含 TTS 音频）
@@ -125,17 +132,21 @@ async function sendMessage(content = null) {
     stopWaitAudio()
     clearWaitTimer()
     
-    // ③ 收到 AI 文本回复后、调用 subagent 总结前播放完成类语音
-    playWaitAudio('completed')
+    // ③ 收到 AI 文本回复后、调用 subagent 总结前播放完成类语音（短消息不播放）
+    if (!isShortMessage) {
+      playWaitAudio('completed')
+    }
     
-    // 短暂延迟后继续（让 completed 语音播放完毕）
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    // 短暂延迟后继续（让 completed 语音播放完毕）（短消息不延迟）
+    if (!isShortMessage) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
     
     // 添加 AI 回复
     chatStore.addMessage('assistant', result.reply)
     
-    // 自动播放语音（使用总结后的内容）
-    if (isAutoPlay.value) {
+    // 自动播放语音（使用总结后的内容）（短消息不播放）
+    if (isAutoPlay.value && !isShortMessage) {
       // 触发 Live2D 说话动画
       if (showLive2D.value && live2dRef.value) {
         live2dRef.value.startSpeaking()
@@ -413,7 +424,7 @@ function playWakeSound() {
 .chat-header h1 {
   font-size: 20px;
   margin: 0;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -545,7 +556,7 @@ function playWakeSound() {
 .dot {
   width: 8px;
   height: 8px;
-  background: #667eea;
+  background: #ff6b9d;
   border-radius: 50%;
   animation: bounce 1.4s infinite ease-in-out both;
 }
@@ -608,12 +619,12 @@ function playWakeSound() {
 }
 
 .input-area textarea:focus {
-  border-color: #667eea;
+  border-color: #ff6b9d;
 }
 
 .send-button {
   padding: 12px 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   color: white;
   border: none;
   border-radius: 12px;

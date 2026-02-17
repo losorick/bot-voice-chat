@@ -43,7 +43,10 @@ const renderedContent = computed(() => {
 <template>
   <div class="message" :class="{ 'message-user': isUser, 'message-assistant': !isUser }">
     <div class="avatar">
-      {{ isUser ? '👤' : '🤖' }}
+      <span v-if="isUser">👤</span>
+      <svg v-else viewBox="0 0 24 24" fill="currentColor" class="bot-avatar">
+        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
+      </svg>
     </div>
     <div class="bubble">
       <!-- 助手消息使用 Markdown 渲染 -->
@@ -83,8 +86,14 @@ const renderedContent = computed(() => {
   flex-shrink: 0;
 }
 
+.bot-avatar {
+  width: 24px;
+  height: 24px;
+  color: #666;
+}
+
 .message-user .avatar {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
 }
 
 .bubble {
@@ -94,13 +103,13 @@ const renderedContent = computed(() => {
 }
 
 .message-user .bubble {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   color: white;
   border-bottom-right-radius: 4px;
 }
 
 .message-assistant .bubble {
-  background: #f5f5f5;
+  background: #fffdd0;
   color: #333;
   border-bottom-left-radius: 4px;
 }
@@ -162,12 +171,20 @@ const renderedContent = computed(() => {
 }
 
 .markdown :deep(a) {
-  color: #667eea;
+  color: #ff6b9d;
   text-decoration: none;
 }
 
 .markdown :deep(a:hover) {
   text-decoration: underline;
+}
+
+/* 图片样式 */
+.markdown :deep(img) {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 2px solid #ddd;
+  margin: 8px 0;
 }
 
 .time {

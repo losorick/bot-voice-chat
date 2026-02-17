@@ -220,7 +220,7 @@ onMounted(() => {
 
 .form-group input:focus,
 .form-group select:focus {
-  border-color: #667eea;
+  border-color: #ff6b9d;
 }
 
 .hint {
@@ -274,7 +274,7 @@ onMounted(() => {
 
 .save-btn {
   padding: 14px 48px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   color: white;
   border: none;
   border-radius: 12px;

@@ -467,7 +467,7 @@ onUnmounted(() => {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   border-radius: 3px;
   transition: width 0.3s;
 }
@@ -542,7 +542,7 @@ onUnmounted(() => {
   width: 30px;
   height: 30px;
   border: 3px solid #f0f0f0;
-  border-top-color: #667eea;
+  border-top-color: #ff6b9d;
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

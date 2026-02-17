@@ -121,7 +121,7 @@ export function useWaveform() {
    */
   function getWaveformColor() {
     // 可以根据状态返回不同颜色
-    return '#667eea'
+    return '#ff6b9d'
   }
 
   /**

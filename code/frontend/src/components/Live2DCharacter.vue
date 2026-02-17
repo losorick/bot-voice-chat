@@ -21,7 +21,15 @@ function handleIframeLoad() {
 
 // 暴露方法
 defineExpose({
-  get iframe() { return iframeRef.value }
+  get iframe() { return iframeRef.value },
+  startSpeaking() {
+    // 暂时未实现 Live2D 说话动画
+    console.log('Live2D: startSpeaking called')
+  },
+  stopSpeaking() {
+    // 暂时未实现 Live2D 说话动画
+    console.log('Live2D: stopSpeaking called')
+  }
 })
 
 onMounted(() => {
@@ -85,7 +93,7 @@ onMounted(() => {
   width: 40px;
   height: 40px;
   border: 3px solid #f0f0f0;
-  border-top-color: #667eea;
+  border-top-color: #ff6b9d;
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

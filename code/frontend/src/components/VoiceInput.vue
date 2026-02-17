@@ -438,7 +438,7 @@ function handleClick() {
   padding: 12px 24px;
   border: none;
   border-radius: 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   color: white;
   font-size: 16px;
   cursor: pointer;
@@ -475,10 +475,10 @@ function handleClick() {
 .mode-toggle {
   width: 44px;
   height: 44px;
-  border: 2px solid #667eea;
+  border: 2px solid #ff6b9d;
   border-radius: 50%;
   background: transparent;
-  color: #667eea;
+  color: #ff6b9d;
   font-size: 18px;
   cursor: pointer;
   transition: all 0.3s ease;
@@ -492,9 +492,9 @@ function handleClick() {
 }
 
 .mode-toggle.active {
-  background: #667eea;
+  background: #ff6b9d;
   color: white;
-  border-color: #667eea;
+  border-color: #ff6b9d;
   animation: glow 2s infinite;
 }
 
@@ -572,7 +572,7 @@ function handleClick() {
 
 .wake-status-badge.waking {
   background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
-  color: #667eea;
+  color: #ff6b9d;
   box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
 }
 
@@ -584,7 +584,7 @@ function handleClick() {
 
 .wake-status-badge.processing {
   background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);
-  color: #764ba2;
+  color: #ff6b9d;
   box-shadow: 0 4px 15px rgba(118, 75, 162, 0.3);
 }
 
@@ -638,7 +638,7 @@ function handleClick() {
   align-items: center;
   gap: 8px;
   padding: 14px 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ff6b9d;
   border-radius: 16px;
   color: white;
   font-size: 16px;
@@ -675,7 +675,7 @@ function handleClick() {
 /* 按钮唤醒中状态 */
 .voice-button.waking {
   background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%) !important;
-  color: #667eea !important;
+  color: #ff6b9d !important;
   animation: shake 0.5s ease;
 }
 
