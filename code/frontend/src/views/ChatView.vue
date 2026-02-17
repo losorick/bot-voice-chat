@@ -145,8 +145,8 @@ async function sendMessage(content = null) {
     // 添加 AI 回复
     chatStore.addMessage('assistant', result.reply)
     
-    // 自动播放语音（使用总结后的内容）（短消息不播放）
-    if (isAutoPlay.value && !isShortMessage) {
+    // 自动播放语音（使用总结后的内容）
+    if (isAutoPlay.value) {
       // 触发 Live2D 说话动画
       if (showLive2D.value && live2dRef.value) {
         live2dRef.value.startSpeaking()

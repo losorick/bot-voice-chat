@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
+const STORAGE_KEY = 'chat_messages'
+
 export const useChatStore = defineStore('chat', () => {
   const messages = ref([])
   const isLoading = ref(false)
@@ -8,6 +10,30 @@ export const useChatStore = defineStore('chat', () => {
   const currentTranscript = ref('')
   const intermediateTranscript = ref('')
   const isFinalTranscript = ref(false)
+
+  // 从本地存储加载消息
+  function loadFromStorage() {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY)
+      if (stored) {
+        messages.value = JSON.parse(stored)
+      }
+    } catch (e) {
+      console.error('Failed to load messages from storage:', e)
+    }
+  }
+
+  // 保存消息到本地存储
+  function saveToStorage() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages.value))
+    } catch (e) {
+      console.error('Failed to save messages to storage:', e)
+    }
+  }
+
+  // 初始化时加载
+  loadFromStorage()
   
   function addMessage(role, content) {
     messages.value.push({
@@ -15,6 +41,7 @@ export const useChatStore = defineStore('chat', () => {
       content,
       timestamp: Date.now()
     })
+    saveToStorage()
   }
   
   function setListening(status) {
@@ -43,6 +70,7 @@ export const useChatStore = defineStore('chat', () => {
   
   function clearMessages() {
     messages.value = []
+    saveToStorage()
   }
   
   return {
