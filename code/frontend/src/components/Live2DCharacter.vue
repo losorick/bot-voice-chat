@@ -45,21 +45,56 @@ async function loadModel() {
       }
     }
     
+    // 动态加载 PIXI v6 (CDN) - pixi-live2d-display@0.4.0 兼容 PIXI v6
+    if (!window.PIXI) {
+      await loadScript('https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/pixi.min.js')
+    }
+    
     // 动态加载 pixi-live2d-display (CDN)
     if (!window.PIXI?.live2d) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js')
     }
     
+    // 等待 PIXI live2d 插件初始化
+    await new Promise(resolve => setTimeout(resolve, 500))
+    
+    // 调试：打印 PIXI 对象
+    console.log('PIXI loaded:', !!window.PIXI)
+    console.log('PIXI.live2d:', !!window.PIXI?.live2d)
+    console.log('PIXI.Application:', window.PIXI?.Application)
+    
+    // 验证 PIXI 和 live2d 插件
+    if (!window.PIXI || !window.PIXI.Application) {
+      throw new Error('PIXI 未正确加载')
+    }
+    if (!window.PIXI.live2d) {
+      throw new Error('PIXI live2d 插件未正确加载')
+    }
+    
     // 创建 PIXI 应用
     const PIXI = window.PIXI
-    app = new PIXI.Application({
-      view: canvasRef.value,
-      width: 400,
-      height: 500,
-      backgroundAlpha: 0,
-      resolution: window.devicePixelRatio || 1,
-      autoDensity: true
-    })
+    
+    // 检查是否是异步初始化
+    if (typeof PIXI.Application === 'function') {
+      app = new PIXI.Application({
+        view: canvasRef.value,
+        width: 400,
+        height: 500,
+        backgroundAlpha: 0,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true
+      })
+    } else {
+      // 可能是异步的
+      app = await PIXI.Application({
+        view: canvasRef.value,
+        width: 400,
+        height: 500,
+        backgroundAlpha: 0,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true
+      })
+    }
     
     // 加载 Live2D 模型
     const { Live2DModel } = window.PIXI.live2d
