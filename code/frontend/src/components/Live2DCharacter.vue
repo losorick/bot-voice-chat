@@ -35,66 +35,50 @@ async function loadModel() {
   try {
     isLoading.value = true
     
-    // 动态加载 Live2D Cubism Core (本地或 CDN)
-    if (!window.Live2DCubismCore) {
-      // 优先尝试本地加载
-      const localLoaded = await loadScriptSafe('/live2d.min.js')
-      if (!localLoaded) {
-        // 回退到 CDN
-        await loadScript('https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js')
-      }
-    }
-    
-    // 动态加载 PIXI v6 (CDN) - pixi-live2d-display@0.4.0 兼容 PIXI v6
+    // 1. 先加载 PIXI v6
     if (!window.PIXI) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/pixi.min.js')
+      // 暴露 PIXI 到 window（pixi-live2d-display 需要）
+      window.PIXI = window.PIXI || window._PIXI
     }
     
-    // 动态加载 pixi-live2d-display (CDN)
+    // 2. 加载 pixi-live2d-display (必须在 PIXI 之后)
     if (!window.PIXI?.live2d) {
       await loadScript('https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js')
     }
     
-    // 等待 PIXI live2d 插件初始化
+    // 3. 加载 Live2D Cubism Core (for 2.1 models like Haru)
+    if (!window.Live2DCubismCore) {
+      await loadScript('https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js')
+    }
+    
+    // 等待加载完成
     await new Promise(resolve => setTimeout(resolve, 500))
     
-    // 调试：打印 PIXI 对象
-    console.log('PIXI loaded:', !!window.PIXI)
+    // 调试日志
+    console.log('PIXI:', !!window.PIXI)
+    console.log('PIXI.Application:', !!window.PIXI?.Application)
     console.log('PIXI.live2d:', !!window.PIXI?.live2d)
-    console.log('PIXI.Application:', window.PIXI?.Application)
+    console.log('Live2DCubismCore:', !!window.Live2DCubismCore)
     
-    // 验证 PIXI 和 live2d 插件
+    // 验证
     if (!window.PIXI || !window.PIXI.Application) {
       throw new Error('PIXI 未正确加载')
     }
     if (!window.PIXI.live2d) {
-      throw new Error('PIXI live2d 插件未正确加载')
+      throw new Error('PIXI live2d 插件未加载')
     }
     
     // 创建 PIXI 应用
     const PIXI = window.PIXI
-    
-    // 检查是否是异步初始化
-    if (typeof PIXI.Application === 'function') {
-      app = new PIXI.Application({
-        view: canvasRef.value,
-        width: 400,
-        height: 500,
-        backgroundAlpha: 0,
-        resolution: window.devicePixelRatio || 1,
-        autoDensity: true
-      })
-    } else {
-      // 可能是异步的
-      app = await PIXI.Application({
-        view: canvasRef.value,
-        width: 400,
-        height: 500,
-        backgroundAlpha: 0,
-        resolution: window.devicePixelRatio || 1,
-        autoDensity: true
-      })
-    }
+    app = new PIXI.Application({
+      view: canvasRef.value,
+      width: 400,
+      height: 500,
+      backgroundAlpha: 0,
+      resolution: window.devicePixelRatio || 1,
+      autoDensity: true
+    })
     
     // 加载 Live2D 模型
     const { Live2DModel } = window.PIXI.live2d
